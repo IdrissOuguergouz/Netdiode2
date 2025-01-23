@@ -9,12 +9,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-// #define PORT 2222
 #define BUFFER_SIZE 1024
 #define TOKEN_LENGTH 256
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
-// #define TRANSFER_DIR "Transfer/"
 #define CONFIG_FILE "config.ini"
 
 // Structure pour l'en-tête du fichier encapsulé
