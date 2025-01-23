@@ -272,20 +272,21 @@ int load_config(const char *filename, Config *config) {
 int main() {
     Config config;
 
+    printf("Chargement de la configuration...\n");
     // Charger la configuration
     if (!load_config(CONFIG_FILE, &config)) {
         fprintf(stderr, "Impossible de charger la configuration\n");
         return EXIT_FAILURE;
     }
 
-    printf("Configuration chargée :\n");
-    printf("Port : %d\n", config.port);
-    printf("Dossier de transfert : %s\n", config.transfer_dir);
-    printf("PID du processus : %d\n", getpid());
+    printf("Configuration chargée avec succès\n");
+    printf("| Port : %d\n", config.port);
+    printf("| Dossier de transfert : %s\n", config.transfer_dir);
 
     // Créer le dossier TRANSFER_DIR si nécessaire
     mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH);
 
+    printf("Démarrage du serveur...\n");
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
         perror("Erreur de création du socket");
@@ -310,6 +311,7 @@ int main() {
     }
 
     printf("Serveur en écoute sur le port %d...\n", config.port);
+    printf("PID du processus : %d\n", getpid());
 
     while (1) {
         int client_socket = accept(server_socket, NULL, NULL);
