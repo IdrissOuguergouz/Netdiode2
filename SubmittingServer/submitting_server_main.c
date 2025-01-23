@@ -4,8 +4,6 @@
 #include <time.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
-#include <openssl/sha.h>
-#include <stdint.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
