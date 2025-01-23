@@ -3,12 +3,12 @@
 #include <string.h>
 #include <time.h>
 #include <openssl/evp.h>
-#include <openssl/rsa.h>
 #include <openssl/pem.h>
 #include <openssl/sha.h>
 #include <stdint.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define PORT 2222
@@ -32,8 +32,7 @@ typedef struct {
 } EncapsulationHeader;
 
 // Liste des IPs autorisées
-//TODO Fichier de config externe
-const char *authorized_ips[] = {"192.168.1.10", "192.168.1.11", NULL};
+const char *authorized_ips[] = {"192.168.56.2", NULL};
 
 // Fonction pour vérifier si une IP est autorisée
 int is_ip_authorized(const char *client_ip) {
@@ -53,20 +52,42 @@ int verify_token(const char *token, const char *public_key_path) {
         return 0;
     }
 
-    RSA *rsa_pubkey = PEM_read_RSA_PUBKEY(pubkey_file, NULL, NULL, NULL);
+    EVP_PKEY *pubkey = PEM_read_PUBKEY(pubkey_file, NULL, NULL, NULL);
     fclose(pubkey_file);
 
-    if (!rsa_pubkey) {
+    if (!pubkey) {
         fprintf(stderr, "Erreur de lecture de la clé publique\n");
         return 0;
     }
 
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pubkey, NULL);
+    if (!ctx) {
+        fprintf(stderr, "Erreur de création du contexte de clé\n");
+        EVP_PKEY_free(pubkey);
+        return 0;
+    }
+
+    if (EVP_PKEY_verify_recover_init(ctx) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation de la vérification\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return 0;
+    }
+
     unsigned char decrypted[TOKEN_LENGTH];
-    int result = RSA_public_decrypt(RSA_size(rsa_pubkey), (unsigned char *)token, decrypted, rsa_pubkey, RSA_PKCS1_PADDING);
+    size_t decrypted_len = sizeof(decrypted);
 
-    RSA_free(rsa_pubkey);
+    if (EVP_PKEY_verify_recover(ctx, decrypted, &decrypted_len, (unsigned char *)token, TOKEN_LENGTH) <= 0) {
+        fprintf(stderr, "Erreur de décryptage du token\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return 0;
+    }
 
-    return result > 0; // Si décryptage réussi, le token est valide
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pubkey);
+
+    return 1; // Si décryptage réussi, le token est valide
 }
 
 // Fonction pour calculer le hash SHA-256 d'un fichier
@@ -77,16 +98,39 @@ void compute_hash(const char *filename, uint8_t *hash) {
         exit(EXIT_FAILURE);
     }
 
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "Erreur de création du contexte de hash\n");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation du hash\n");
+        EVP_MD_CTX_free(mdctx);
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
 
     uint8_t buffer[1024];
     size_t bytesRead;
     while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        SHA256_Update(&sha256, buffer, bytesRead);
+        if (EVP_DigestUpdate(mdctx, buffer, bytesRead) <= 0) {
+            fprintf(stderr, "Erreur de mise à jour du hash\n");
+            EVP_MD_CTX_free(mdctx);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
     }
 
-    SHA256_Final(hash, &sha256);
+    if (EVP_DigestFinal_ex(mdctx, hash, NULL) <= 0) {
+        fprintf(stderr, "Erreur de finalisation du hash\n");
+        EVP_MD_CTX_free(mdctx);
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    EVP_MD_CTX_free(mdctx);
     fclose(file);
 }
 
@@ -202,7 +246,7 @@ void handle_client(int client_socket, const char *public_key_path) {
 }
 
 int main() {
-    mkdir(TRANSFER_DIR, 0777);
+    mkdir(TRANSFER_DIR, S_IRWXU | S_IRWXG | S_IROTH);
 
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
