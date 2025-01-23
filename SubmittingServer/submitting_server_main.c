@@ -9,12 +9,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define PORT 2222
+// #define PORT 2222
 #define BUFFER_SIZE 1024
 #define TOKEN_LENGTH 256
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
-#define TRANSFER_DIR "Transfer/"
+// #define TRANSFER_DIR "Transfer/"
+#define CONFIG_FILE "config.ini"
 
 // Structure pour l'en-tête du fichier encapsulé
 typedef struct {
@@ -28,6 +29,12 @@ typedef struct {
     uint8_t hash[32]; // SHA-256
     uint8_t ecc[32];  // Données pour correction d'erreurs
 } EncapsulationHeader;
+
+// Structure pour les paramètres de configuration
+typedef struct {
+    int port;
+    char transfer_dir[256];
+} Config;
 
 // Liste des IPs autorisées
 const char *authorized_ips[] = {"192.168.56.2", NULL};
@@ -188,7 +195,7 @@ void encapsulate_file(const char *original_file, const char *recipient, const ch
 }
 
 // Fonction pour gérer un client
-void handle_client(int client_socket, const char *public_key_path) {
+void handle_client(int client_socket, const char *public_key_path, const char *transfer_dir) {
     char buffer[BUFFER_SIZE];
     ssize_t bytes_received;
 
@@ -235,7 +242,7 @@ void handle_client(int client_socket, const char *public_key_path) {
 
     // Étape 4 : Encapsulation
     char output_file[BUFFER_SIZE];
-    snprintf(output_file, sizeof(output_file), "%s/encapsulated_%ld.bin", TRANSFER_DIR, time(NULL));
+    snprintf(output_file, sizeof(output_file), "%s/encapsulated_%ld.bin", transfer_dir, time(NULL));
     encapsulate_file("temp_received_file", recipient, output_file);
 
     // Nettoyage
@@ -243,38 +250,72 @@ void handle_client(int client_socket, const char *public_key_path) {
     close(client_socket);
 }
 
+// Fonction pour charger la configuration
+int load_config(const char *filename, Config *config) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        perror("Erreur d'ouverture du fichier de configuration");
+        return 0;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "port", 4) == 0) {
+            sscanf(line, "port = %d", &config->port);
+        } else if (strncmp(line, "transfer_dir", 12) == 0) {
+            sscanf(line, "transfer_dir = %s", config->transfer_dir);
+        }
+    }
+
+    fclose(file);
+    return 1;
+}
+
 int main() {
-    mkdir(TRANSFER_DIR, S_IRWXU | S_IRWXG | S_IROTH);
+    Config config;
+
+    // Charger la configuration
+    if (!load_config(CONFIG_FILE, &config)) {
+        fprintf(stderr, "Impossible de charger la configuration\n");
+        return EXIT_FAILURE;
+    }
+
+    printf("Configuration chargée :\n");
+    printf("Port : %d\n", config.port);
+    printf("Dossier de transfert : %s\n", config.transfer_dir);
+
+    // Créer le dossier TRANSFER_DIR si nécessaire
+    mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH);
 
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
         perror("Erreur de création du socket");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_port = htons(config.port);
 
     if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Erreur de liaison du socket");
         close(server_socket);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     if (listen(server_socket, 5) < 0) {
         perror("Erreur d'écoute sur le socket");
         close(server_socket);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
-    printf("Serveur en écoute sur le port %d...\n", PORT);
+    printf("Serveur en écoute sur le port %d...\n", config.port);
 
     while (1) {
         int client_socket = accept(server_socket, NULL, NULL);
         if (client_socket >= 0) {
-            handle_client(client_socket, "public_key.pem");
+            handle_client(client_socket, "public_key.pem", config.transfer_dir);
         }
     }
 
