@@ -281,6 +281,7 @@ int main() {
     printf("Configuration chargée :\n");
     printf("Port : %d\n", config.port);
     printf("Dossier de transfert : %s\n", config.transfer_dir);
+    printf("PID du processus : %d\n", getpid());
 
     // Créer le dossier TRANSFER_DIR si nécessaire
     mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH);
