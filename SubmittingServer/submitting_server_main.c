@@ -35,7 +35,7 @@ typedef struct {
 } Config;
 
 // Liste des IPs autorisées
-const char *authorized_ips[] = {"192.168.56.2", NULL};
+const char *authorized_ips[] = {"192.168.56.2", "127.0.0.1", NULL};
 
 // Fonction pour vérifier si une IP est autorisée
 int is_ip_authorized(const char *client_ip) {
