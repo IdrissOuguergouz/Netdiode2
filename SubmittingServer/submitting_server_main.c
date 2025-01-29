@@ -2,15 +2,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <cjson/cJSON.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
-#define BUFFER_SIZE 1024
-#define TOKEN_LENGTH 256
+#define CLIENT_DATA_BUFFER_SIZE 1024
+#define SIGNATURE_SIZE 256
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
 #define CONFIG_FILE "config.ini"
@@ -32,10 +35,12 @@ typedef struct {
 typedef struct {
     int port;
     char transfer_dir[256];
+    char keys_path[256];
 } Config;
 
 // Liste des IPs autorisées
 const char *authorized_ips[] = {"192.168.56.2", "127.0.0.1", NULL};
+//TODO importer l'ACL depuis un fichier de config externe (autre que config.ini)
 
 // Fonction pour vérifier si une IP est autorisée
 int is_ip_authorized(const char *client_ip) {
@@ -47,8 +52,10 @@ int is_ip_authorized(const char *client_ip) {
     return 0;
 }
 
-// Fonction pour vérifier le token avec une clé publique
-int verify_token(const char *token, const char *public_key_path) {
+// Fonction pour vérifier une signature avec une clé publique
+int verify_signature(const unsigned char *message, size_t message_len,
+                     const unsigned char *signature, size_t signature_len,
+                     const char *public_key_path) {
     FILE *pubkey_file = fopen(public_key_path, "r");
     if (!pubkey_file) {
         perror("Erreur d'ouverture de la clé publique");
@@ -63,34 +70,34 @@ int verify_token(const char *token, const char *public_key_path) {
         return 0;
     }
 
-    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pubkey, NULL);
-    if (!ctx) {
-        fprintf(stderr, "Erreur de création du contexte de clé\n");
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "Erreur de création du contexte de vérification\n");
         EVP_PKEY_free(pubkey);
         return 0;
     }
 
-    if (EVP_PKEY_verify_recover_init(ctx) <= 0) {
+    if (EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pubkey) <= 0) {
         fprintf(stderr, "Erreur d'initialisation de la vérification\n");
-        EVP_PKEY_CTX_free(ctx);
+        EVP_MD_CTX_free(mdctx);
         EVP_PKEY_free(pubkey);
         return 0;
     }
 
-    unsigned char decrypted[TOKEN_LENGTH];
-    size_t decrypted_len = sizeof(decrypted);
+    int result = EVP_DigestVerify(mdctx, signature, signature_len, message, message_len);
 
-    if (EVP_PKEY_verify_recover(ctx, decrypted, &decrypted_len, (unsigned char *)token, TOKEN_LENGTH) <= 0) {
-        fprintf(stderr, "Erreur de décryptage du token\n");
-        EVP_PKEY_CTX_free(ctx);
-        EVP_PKEY_free(pubkey);
-        return 0;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
+    EVP_MD_CTX_free(mdctx);
     EVP_PKEY_free(pubkey);
 
-    return 1; // Si décryptage réussi, le token est valide
+    if (result == 1) {
+        return 1; // Signature valide
+    } else if (result == 0) {
+        fprintf(stderr, "Signature invalide\n");
+        return 0;
+    } else {
+        fprintf(stderr, "Erreur lors de la vérification de la signature\n");
+        return 0;
+    }
 }
 
 // Fonction pour calculer le hash SHA-256 d'un fichier
@@ -135,6 +142,20 @@ void compute_hash(const char *filename, uint8_t *hash) {
 
     EVP_MD_CTX_free(mdctx);
     fclose(file);
+}
+
+size_t base64_decode(const char *input, size_t input_len, unsigned char *output) {
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *bio = BIO_new_mem_buf(input, input_len);
+    bio = BIO_push(b64, bio);
+
+    // Désactiver le saut de ligne dans le Base64
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+    const size_t output_len = BIO_read(bio, output, input_len);
+    BIO_free_all(bio);
+
+    return output_len;
 }
 
 // Fonction pour encapsuler un fichier
@@ -193,58 +214,102 @@ void encapsulate_file(const char *original_file, const char *recipient, const ch
 }
 
 // Fonction pour gérer un client
-void handle_client(int client_socket, const char *public_key_path, const char *transfer_dir) {
-    char buffer[BUFFER_SIZE];
-    ssize_t bytes_received;
+void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
+    char buffer[CLIENT_DATA_BUFFER_SIZE];
+    size_t bytes_received;
 
-    // Étape 1 : Vérification de l'IP
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
     getpeername(client_socket, (struct sockaddr *)&client_addr, &addr_len);
     const char *client_ip = inet_ntoa(client_addr.sin_addr);
 
-    if (!is_ip_authorized(client_ip)) {
-        fprintf(stderr, "IP non autorisée : %s\n", client_ip);
+    printf("Tentative de connexion de %s\n", client_ip);
+
+    // Étape 1 : Vérification de l'IP
+    if (is_ip_authorized(client_ip)) {
+        printf("| Connexion autorisée\n");
+    } else {
+        fprintf(stderr, "| Connexion bloquée\n");
+        const char *response = "Connexion impossible : IP non autorisée\n";
+        send(client_socket, response, strlen(response), 0);
+        shutdown(client_socket, SHUT_RDWR);
         close(client_socket);
         return;
     }
 
-    // Étape 2 : Vérification du token
-    bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-    if (bytes_received <= 0 || !verify_token(buffer, public_key_path)) {
-        fprintf(stderr, "Token invalide ou réception échouée\n");
-        close(client_socket);
-        return;
-    }
-
-    // Étape 3 : Réception des métadonnées et du fichier
-    char recipient[MAX_DEST_SIZE];
-    bytes_received = recv(client_socket, recipient, sizeof(recipient), 0);
+    // Étape 2 : Réception des données
+    bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (bytes_received <= 0) {
-        fprintf(stderr, "Erreur lors de la réception du destinataire\n");
+        fprintf(stderr, "Erreur lors de la réception des données\n");
+        close(client_socket);
+        return;
+    }
+    buffer[bytes_received] = '\0';
+
+    cJSON *json = cJSON_Parse(buffer);
+    if (!json) {
+        fprintf(stderr, "Erreur de parsing du JSON\n");
         close(client_socket);
         return;
     }
 
-    FILE *temp_file = fopen("temp_received_file", "wb");
-    if (!temp_file) {
-        perror("Erreur d'ouverture du fichier temporaire");
+    // Extraire les métadonnées
+    cJSON *metadata = cJSON_GetObjectItem(json, "metadata");
+    if (!metadata) {
+        fprintf(stderr, "Métadonnées manquantes\n");
+        cJSON_Delete(json);
         close(client_socket);
         return;
     }
 
-    while ((bytes_received = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
-        fwrite(buffer, 1, bytes_received, temp_file);
+    const char *recipient = cJSON_GetObjectItem(metadata, "recipient")->valuestring;
+    const char *data_type = cJSON_GetObjectItem(metadata, "type")->valuestring;
+
+    // Extraire les données encodées du fichier
+    const char *file_data_base64 = cJSON_GetObjectItem(json, "file")->valuestring;
+    const char *signature_base64 = cJSON_GetObjectItem(json, "signature")->valuestring;
+
+    // Décodage de base64 des données fichier et de la signature
+    unsigned char file_data[CLIENT_DATA_BUFFER_SIZE];
+    size_t file_data_len = base64_decode(file_data_base64, strlen(file_data_base64), file_data);
+
+    unsigned char signature[SIGNATURE_SIZE];
+    base64_decode(signature_base64, strlen(signature_base64), signature);
+
+    // Étape 3 : Vérifier la signature avec la clé publique
+    if (!verify_signature(file_data, file_data_len, signature, SIGNATURE_SIZE, keys_path)) {
+        fprintf(stderr, "Échec de l'authentification du client\n");
+        cJSON_Delete(json);
+        close(client_socket);
+        return;
     }
-    fclose(temp_file);
+    printf("Client authentifié avec succès\n");
 
-    // Étape 4 : Encapsulation
-    char output_file[BUFFER_SIZE];
-    snprintf(output_file, sizeof(output_file), "%s/encapsulated_%ld.bin", transfer_dir, time(NULL));
-    encapsulate_file("temp_received_file", recipient, output_file);
+    // Étape 4 : Sauvegarder/traiter selon le type de données
+    if (strcmp(data_type, "FILE") == 0) {
+        char output_file[CLIENT_DATA_BUFFER_SIZE];
+        snprintf(output_file, sizeof(output_file), "received_file_%ld.bin", time(NULL));
 
-    // Nettoyage
-    remove("temp_received_file");
+        FILE *output = fopen(output_file, "wb");
+        if (!output) {
+            perror("Erreur d'ecriture du fichier");
+            cJSON_Delete(json);
+            close(client_socket);
+            return;
+        }
+
+        fwrite(file_data, 1, file_data_len, output);
+        fclose(output);
+
+        printf("Fichier sauvegardé : %s\n", output_file);
+    } else if (strcmp(data_type, "MAIL") == 0) {
+        printf("Traitement des mails non implémenté\n");
+        // TODO : Ajouter un traitement spécifique pour les mails.
+    } else {
+        fprintf(stderr, "Type de données inconnu : %s\n", data_type);
+    }
+
+    cJSON_Delete(json);
     close(client_socket);
 }
 
@@ -259,9 +324,17 @@ int load_config(const char *filename, Config *config) {
     char line[256];
     while (fgets(line, sizeof(line), file)) {
         if (strncmp(line, "port", 4) == 0) {
-            sscanf(line, "port = %d", &config->port);
+            if (sscanf(line, "port = %d", &config->port) != 1) {
+                fprintf(stderr, "Erreur : impossible de lire 'port'.\n");
+            }
         } else if (strncmp(line, "transfer_dir", 12) == 0) {
-            sscanf(line, "transfer_dir = %s", config->transfer_dir);
+            if (sscanf(line, "transfer_dir = %s", config->transfer_dir) != 1) {
+                fprintf(stderr, "Erreur : impossible de lire 'transfer_dir'.\n");
+            }
+        } else if (strncmp(line, "keys_path", 9) == 0) {
+            if (sscanf(line, "keys_path = %s", config->keys_path) != 1) {
+                fprintf(stderr, "Erreur : impossible de lire 'keys_path'.\n");
+            }
         }
     }
 
@@ -271,22 +344,73 @@ int load_config(const char *filename, Config *config) {
 
 int main() {
     Config config;
+    printf("Démarrage du serveur GhostTransfer...\n");
+    if (!load_config(CONFIG_FILE, &config)) {
 
     printf("Chargement de la configuration...\n");
-    // Charger la configuration
-    if (!load_config(CONFIG_FILE, &config)) {
         fprintf(stderr, "Impossible de charger la configuration\n");
+        return EXIT_FAILURE;
+    } else {
+        printf("Configuration chargée avec succès\n");
+        printf("| Port : %d\n", config.port);
+        printf("| Dossier de transfert : %s\n", config.transfer_dir);
+        printf("| Localisation des clés RSA : %s\n", config.keys_path);
+    }
+
+    // Vérifier et créer le dossier transfer_dir si nécessaire
+    struct stat transfer_dir_stat;
+    if (stat(config.transfer_dir, &transfer_dir_stat) != 0) {
+        // Le dossier n'existe pas, on le crée
+        if (mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH) != 0) {
+            perror("Erreur lors de la création du dossier transfer_dir");
+            return EXIT_FAILURE;
+        }
+        printf("Dossier de transfert créé : %s\n", config.transfer_dir);
+    } else if (!S_ISDIR(transfer_dir_stat.st_mode)) {
+        // Si un fichier avec le même nom existe, erreur
+        fprintf(stderr, "Erreur : %s existe mais n'est pas un dossier\n", config.transfer_dir);
         return EXIT_FAILURE;
     }
 
-    printf("Configuration chargée avec succès\n");
-    printf("| Port : %d\n", config.port);
-    printf("| Dossier de transfert : %s\n", config.transfer_dir);
+    // Vérifier et créer le dossier keys_path et son arborescence si nécessaire
+    struct stat keys_dir_stat;
+    if (stat(config.keys_path, &keys_dir_stat) != 0) {
+        // Le dossier n'existe pas, on le crée
+        if (mkdir(config.keys_path, S_IRWXU | S_IRGRP | S_IROTH) != 0) {
+            perror("Erreur lors de la création du dossier keys_path");
+            return EXIT_FAILURE;
+        }
+        printf("Dossier des clés créé : %s\n", config.keys_path);
+    } else if (!S_ISDIR(keys_dir_stat.st_mode)) {
+        // Si un fichier avec le même nom existe, erreur
+        fprintf(stderr, "Erreur : %s existe mais n'est pas un dossier\n", config.keys_path);
+        return EXIT_FAILURE;
+    }
 
-    // Créer le dossier TRANSFER_DIR si nécessaire
-    mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH);
+    // Créer le dossier private avec les permissions 700
+    if (mkdir("keys/private", S_IRWXU) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier private");
+        return EXIT_FAILURE;
+    }
 
-    printf("Démarrage du serveur...\n");
+    // Créer le dossier public avec les permissions 775
+    if (mkdir("keys/public", S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier public");
+        return EXIT_FAILURE;
+    }
+
+    // Créer le dossier clients avec les permissions 775
+    if (mkdir("keys/public/clients", S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier clients");
+        return EXIT_FAILURE;
+    }
+
+    // Créer le dossier servers avec les permissions 700
+    if (mkdir("keys/public/servers", S_IRWXU) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier servers");
+        return EXIT_FAILURE;
+    }
+
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
         perror("Erreur de création du socket");
@@ -316,7 +440,7 @@ int main() {
     while (1) {
         int client_socket = accept(server_socket, NULL, NULL);
         if (client_socket >= 0) {
-            handle_client(client_socket, "public_key.pem", config.transfer_dir);
+            handle_client(client_socket, config.keys_path, config.transfer_dir);
         }
     }
 
