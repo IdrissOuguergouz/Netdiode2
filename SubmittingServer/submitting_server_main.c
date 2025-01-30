@@ -17,6 +17,8 @@
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
 #define CONFIG_FILE "config.ini"
+#define MAX_IP_ENTRIES 1000
+#define ACL "ACL.txt"
 
 // Structure pour l'en-tête du fichier encapsulé
 typedef struct {
@@ -38,14 +40,89 @@ typedef struct {
     char keys_path[256];
 } Config;
 
-// Liste des IPs autorisées
-const char *authorized_ips[] = {"192.168.56.2", "127.0.0.1", NULL};
-//TODO importer l'ACL depuis un fichier de config externe (autre que config.ini)
+struct in_addr acl_ips[MAX_IP_ENTRIES];  // Tableau d'IP autorisées
+int acl_count = 0;  // Nombre d'IP stockées
 
-// Fonction pour vérifier si une IP est autorisée
+// Fonction pour convertir une adresse CIDR en une plage d'IP et les stocker
+void add_cidr_range(const char *cidr) {
+    char ip[INET_ADDRSTRLEN];
+    int prefix;
+    struct in_addr start, end;
+
+    sscanf(cidr, "%[^/]/%d", ip, &prefix);
+    if (inet_pton(AF_INET, ip, &start) != 1) return;
+
+    uint32_t mask = 0xFFFFFFFF << (32 - prefix);
+    uint32_t ip_addr = ntohl(start.s_addr);
+    uint32_t range_start = ip_addr & mask;
+    uint32_t range_end = range_start | ~mask;
+
+    for (uint32_t i = range_start; i <= range_end && acl_count < MAX_IP_ENTRIES; i++) {
+        acl_ips[acl_count++].s_addr = htonl(i);
+    }
+}
+
+// Fonction pour ajouter une plage d'IP
+void add_ip_range(const char *range) {
+    char start_ip[INET_ADDRSTRLEN], end_ip[INET_ADDRSTRLEN];
+    struct in_addr start, end;
+
+    sscanf(range, "%[^-]-%s", start_ip, end_ip);
+    if (inet_pton(AF_INET, start_ip, &start) != 1 || inet_pton(AF_INET, end_ip, &end) != 1) return;
+
+    uint32_t start_addr = ntohl(start.s_addr);
+    uint32_t end_addr = ntohl(end.s_addr);
+
+    for (uint32_t i = start_addr; i <= end_addr && acl_count < MAX_IP_ENTRIES; i++) {
+        acl_ips[acl_count++].s_addr = htonl(i);
+    }
+}
+
+// Fonction pour charger ACL.txt dans acl_ips[]
+int load_acl(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        perror("Erreur d'ouverture du fichier ACL");
+        return 0;
+    }
+
+    char line[64];
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\n")] = 0;  // Supprimer le saut de ligne
+
+        if (strchr(line, '/')) {  // CIDR
+            add_cidr_range(line);
+        } else if (strchr(line, '-')) {  // Plage IP
+            add_ip_range(line);
+        } else {  // IP unique
+            if (inet_pton(AF_INET, line, &acl_ips[acl_count]) == 1 && acl_count < MAX_IP_ENTRIES) {
+                acl_count++;
+            }
+        }
+    }
+
+    fclose(file);
+    return 1;
+}
+
+// Fonction pour afficher le tableau acl_ips[]
+void print_acl() {
+    char ip_str[INET_ADDRSTRLEN];
+    printf("ACL chargée (%d IPs) :\n", acl_count);
+    for (int i = 0; i < acl_count; i++) {
+        inet_ntop(AF_INET, &acl_ips[i], ip_str, sizeof(ip_str));
+        printf("  - %s\n", ip_str);
+    }
+}
+
 int is_ip_authorized(const char *client_ip) {
-    for (int i = 0; authorized_ips[i] != NULL; i++) {
-        if (strcmp(client_ip, authorized_ips[i]) == 0) {
+    struct in_addr client_addr;
+    if (inet_pton(AF_INET, client_ip, &client_addr) != 1) {
+        return 0;
+    }
+
+    for (int i = 0; i < acl_count; i++) {
+        if (client_addr.s_addr == acl_ips[i].s_addr) {
             return 1;
         }
     }
@@ -355,6 +432,13 @@ int main() {
         printf("| Port : %d\n", config.port);
         printf("| Dossier de transfert : %s\n", config.transfer_dir);
         printf("| Localisation des clés RSA : %s\n", config.keys_path);
+    }
+
+    if (load_acl(ACL)) {
+        printf("ACL chargée avec succès !\n");
+        print_acl();
+    } else {
+        printf("Erreur de chargement de l'ACL\n");
     }
 
     // Vérifier et créer le dossier transfer_dir si nécessaire
