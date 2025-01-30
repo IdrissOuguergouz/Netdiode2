@@ -1,0 +1,11 @@
+{
+    "metadata": {
+        "filename": "email.eml",
+        "filesize": 12345,
+        "data_type": "MAIL",
+        "recipient": "recipient@example.com"
+    },
+    "content": "base64_encoded_content_here",
+    "signature": "base64_encoded_signature_here",
+    "client_id": "client123"
+}
