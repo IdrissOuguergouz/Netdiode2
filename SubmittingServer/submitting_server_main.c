@@ -106,16 +106,6 @@ int load_acl(const char *filename) {
     return 1;
 }
 
-// Fonction pour afficher le tableau acl_ips[]
-void print_acl() {
-    char ip_str[INET_ADDRSTRLEN];
-    printf("ACL chargée (%d IPs) :\n", acl_count);
-    for (int i = 0; i < acl_count; i++) {
-        inet_ntop(AF_INET, &acl_ips[i], ip_str, sizeof(ip_str));
-        printf("  - %s\n", ip_str);
-    }
-}
-
 int is_ip_authorized(const char *client_ip) {
     struct in_addr client_addr;
     if (inet_pton(AF_INET, client_ip, &client_addr) != 1) {
@@ -453,7 +443,6 @@ int main() {
 
     if (load_acl(ACL)) {
         printf("ACL chargée avec succès !\n");
-        print_acl();
     } else {
         printf("Erreur de chargement de l'ACL\n");
     }
