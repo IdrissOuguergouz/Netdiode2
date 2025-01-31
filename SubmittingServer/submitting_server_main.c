@@ -165,13 +165,10 @@ int is_ip_authorized(const char *client_ip) {
 }
 
 // Fonction pour vérifier une signature avec une clé publique
-int verify_signature(const unsigned char *content, const unsigned char *signature,
-                     size_t signature_len, const char *public_key_path) {
-    
-    uint8_t content_hash[32];
-    compute_hash(content, content_hash);
-    size_t content_hash_len = sizeof(content_hash);
-    
+int verify_signature(const unsigned char *content, size_t content_len,
+                     const unsigned char *signature, size_t signature_len, 
+                     const char *public_key_path) {
+
     char full_public_key_path[512];
     snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/public_key.pem", public_key_path);
     FILE *pubkey_file = fopen(full_public_key_path, "r");
@@ -179,23 +176,6 @@ int verify_signature(const unsigned char *content, const unsigned char *signatur
         perror("Erreur d'ouverture de la clé publique");
         return -1;
     }
-
-    FILE *f = fopen("debug_signature.bin", "wb");
-    fwrite(signature, 1, signature_len, f);
-    fclose(f);
-
-    printf("Content length: %zu\n", content_hash_len);
-    printf("Signature length: %zu\n", signature_len);
-    printf("Public key path: %s\n", full_public_key_path);
-    printf("Signature (first 32 bytes): ");
-    for (size_t i = 0; i < 1024 && i < signature_len; i++) {
-        printf("%02x", signature[i]);
-    }
-    printf("\nContent hash (first 32 bytes): ");
-    for (size_t i = 0; i < 64 && i < content_hash_len; i++) {
-        printf("%02x", content_hash[i]);
-    }
-    printf("\n");
 
     EVP_PKEY *pubkey = PEM_read_PUBKEY(pubkey_file, NULL, NULL, NULL);
     fclose(pubkey_file);
@@ -222,7 +202,7 @@ int verify_signature(const unsigned char *content, const unsigned char *signatur
 
     EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PADDING);
     
-    if (EVP_DigestVerifyUpdate(mdctx, content, sizeof(content)) <= 0) {
+    if (EVP_DigestVerifyUpdate(mdctx, content, content_len) <= 0) {
         fprintf(stderr, "Erreur de mise à jour de la vérification\n");
         EVP_MD_CTX_free(mdctx);
         EVP_PKEY_free(pubkey);
@@ -238,10 +218,8 @@ int verify_signature(const unsigned char *content, const unsigned char *signatur
     if (result == 1) {
         return 1; // Signature valide
     } else if (result == 0) {
-        // fprintf(stderr, "Signature invalide\n");
         return 0;
     } else {
-        // fprintf(stderr, "Erreur lors de la vérification de la signature\n");
         return -1;
     }
 }
@@ -376,7 +354,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
 
     // Étape 3 : Vérifier la signature avec la clé publique
     printf("| Authentification du client...\n");
-    int result = verify_signature(content_data, signature, signature_len, keys_path);
+    int result = verify_signature(content_data, content_data_len, signature, signature_len, keys_path);
     if (result == 1) {
         printf("| Client authentifié avec succès\n");
     } else if (result == 0) {
