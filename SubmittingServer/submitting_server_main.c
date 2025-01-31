@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/err.h>
 #include <cjson/cJSON.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -106,6 +107,49 @@ int load_acl(const char *filename) {
     return 1;
 }
 
+// Fonction pour calculer le hash SHA-256 d'une chaîne de caractères
+void compute_hash(const char *input, uint8_t *hash) {
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "Erreur de création du contexte de hash\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation du hash\n");
+        EVP_MD_CTX_free(mdctx);
+        exit(EXIT_FAILURE);
+    }
+
+    if (EVP_DigestUpdate(mdctx, input, strlen(input)) <= 0) {
+        fprintf(stderr, "Erreur de mise à jour du hash\n");
+        EVP_MD_CTX_free(mdctx);
+        exit(EXIT_FAILURE);
+    }
+
+    if (EVP_DigestFinal_ex(mdctx, hash, NULL) <= 0) {
+        fprintf(stderr, "Erreur de finalisation du hash\n");
+        EVP_MD_CTX_free(mdctx);
+        exit(EXIT_FAILURE);
+    }
+
+    EVP_MD_CTX_free(mdctx);
+}
+
+size_t base64_decode(const char *input, unsigned char *output) {
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *bio = BIO_new_mem_buf(input, -1);
+    bio = BIO_push(b64, bio);
+
+    // Désactiver le saut de ligne dans le Base64
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+    const size_t input_len = strlen(input);
+    const size_t output_len = BIO_read(bio, output, input_len);
+    BIO_free_all(bio);
+    return output_len;
+}
+
 int is_ip_authorized(const char *client_ip) {
     struct in_addr client_addr;
     if (inet_pton(AF_INET, client_ip, &client_addr) != 1) {
@@ -121,111 +165,85 @@ int is_ip_authorized(const char *client_ip) {
 }
 
 // Fonction pour vérifier une signature avec une clé publique
-int verify_signature(const unsigned char *message, size_t message_len,
-                     const unsigned char *signature, size_t signature_len,
-                     const char *public_key_path) {
+int verify_signature(const unsigned char *content, const unsigned char *signature,
+                     size_t signature_len, const char *public_key_path) {
+    
+    uint8_t content_hash[32];
+    compute_hash(content, content_hash);
+    size_t content_hash_len = sizeof(content_hash);
+    
     char full_public_key_path[512];
-    snprintf(full_public_key_path, sizeof(full_public_key_path), "%s/public/clients/public_key.pem", public_key_path);
+    snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/public_key.pem", public_key_path);
     FILE *pubkey_file = fopen(full_public_key_path, "r");
     if (!pubkey_file) {
         perror("Erreur d'ouverture de la clé publique");
-        return 0;
+        return -1;
     }
+
+    FILE *f = fopen("debug_signature.bin", "wb");
+    fwrite(signature, 1, signature_len, f);
+    fclose(f);
+
+    printf("Content length: %zu\n", content_hash_len);
+    printf("Signature length: %zu\n", signature_len);
+    printf("Public key path: %s\n", full_public_key_path);
+    printf("Signature (first 32 bytes): ");
+    for (size_t i = 0; i < 1024 && i < signature_len; i++) {
+        printf("%02x", signature[i]);
+    }
+    printf("\nContent hash (first 32 bytes): ");
+    for (size_t i = 0; i < 64 && i < content_hash_len; i++) {
+        printf("%02x", content_hash[i]);
+    }
+    printf("\n");
 
     EVP_PKEY *pubkey = PEM_read_PUBKEY(pubkey_file, NULL, NULL, NULL);
     fclose(pubkey_file);
 
     if (!pubkey) {
         fprintf(stderr, "Erreur de lecture de la clé publique\n");
-        return 0;
+        return -1;
     }
 
     EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
     if (!mdctx) {
         fprintf(stderr, "Erreur de création du contexte de vérification\n");
         EVP_PKEY_free(pubkey);
-        return 0;
+        return -1;
     }
 
-    if (EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pubkey) <= 0) {
+    EVP_PKEY_CTX *pkey_ctx;
+    if (EVP_DigestVerifyInit(mdctx, &pkey_ctx, EVP_sha256(), NULL, pubkey) <= 0) {
         fprintf(stderr, "Erreur d'initialisation de la vérification\n");
         EVP_MD_CTX_free(mdctx);
         EVP_PKEY_free(pubkey);
-        return 0;
+        return -1;
     }
 
-    int result = EVP_DigestVerify(mdctx, signature, signature_len, message, message_len);
+    EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PADDING);
+    
+    if (EVP_DigestVerifyUpdate(mdctx, content, sizeof(content)) <= 0) {
+        fprintf(stderr, "Erreur de mise à jour de la vérification\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
 
+    printf("Signature length expected: %d, actual: %zu\n", EVP_PKEY_size(pubkey), signature_len);
+
+    int result = EVP_DigestVerifyFinal(mdctx, signature, signature_len);
     EVP_MD_CTX_free(mdctx);
     EVP_PKEY_free(pubkey);
 
     if (result == 1) {
         return 1; // Signature valide
     } else if (result == 0) {
-        fprintf(stderr, "Signature invalide\n");
+        // fprintf(stderr, "Signature invalide\n");
         return 0;
     } else {
-        fprintf(stderr, "Erreur lors de la vérification de la signature\n");
-        return 0;
+        // fprintf(stderr, "Erreur lors de la vérification de la signature\n");
+        return -1;
     }
-}
-
-// Fonction pour calculer le hash SHA-256 d'un fichier
-void compute_hash(const char *filename, uint8_t *hash) {
-    FILE *file = fopen(filename, "rb");
-    if (!file) {
-        perror("Erreur d'ouverture du fichier");
-        exit(EXIT_FAILURE);
-    }
-
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-    if (!mdctx) {
-        fprintf(stderr, "Erreur de création du contexte de hash\n");
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) <= 0) {
-        fprintf(stderr, "Erreur d'initialisation du hash\n");
-        EVP_MD_CTX_free(mdctx);
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
-
-    uint8_t buffer[1024];
-    size_t bytesRead;
-    while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        if (EVP_DigestUpdate(mdctx, buffer, bytesRead) <= 0) {
-            fprintf(stderr, "Erreur de mise à jour du hash\n");
-            EVP_MD_CTX_free(mdctx);
-            fclose(file);
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    if (EVP_DigestFinal_ex(mdctx, hash, NULL) <= 0) {
-        fprintf(stderr, "Erreur de finalisation du hash\n");
-        EVP_MD_CTX_free(mdctx);
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
-
-    EVP_MD_CTX_free(mdctx);
-    fclose(file);
-}
-
-size_t base64_decode(const char *input, size_t input_len, unsigned char *output) {
-    BIO *b64 = BIO_new(BIO_f_base64());
-    BIO *bio = BIO_new_mem_buf(input, input_len);
-    bio = BIO_push(b64, bio);
-
-    // Désactiver le saut de ligne dans le Base64
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
-
-    const size_t output_len = BIO_read(bio, output, input_len);
-    BIO_free_all(bio);
-
-    return output_len;
 }
 
 // Fonction pour encapsuler un fichier
@@ -316,7 +334,6 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     } else {
         printf("| Reception de %ldB de données\n", bytes_received);
     }
-    buffer[bytes_received] = '\0';
 
     cJSON *json = cJSON_Parse(buffer);
     if (!json) {
@@ -351,22 +368,31 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     const char *client_id = cJSON_GetObjectItem(json, "client_id")->valuestring;
 
     // Décodage de base64 des données fichier et de la signature
-    unsigned char file_data[CLIENT_DATA_BUFFER_SIZE];
-    size_t file_data_len = base64_decode(content_data_base64, strlen(content_data_base64), file_data);
+    unsigned char content_data[CLIENT_DATA_BUFFER_SIZE];
+    size_t content_data_len = base64_decode(content_data_base64, content_data);
 
     unsigned char signature[SIGNATURE_SIZE];
-    base64_decode(signature_base64, strlen(signature_base64), signature);
+    size_t signature_len = base64_decode(signature_base64, signature);
 
     // Étape 3 : Vérifier la signature avec la clé publique
-    if (!verify_signature(file_data, file_data_len, signature, SIGNATURE_SIZE, keys_path)) {
-        fprintf(stderr, "| Échec de l'authentification du client\n");
+    printf("| Authentification du client...\n");
+    int result = verify_signature(content_data, signature, signature_len, keys_path);
+    if (result == 1) {
+        printf("| Client authentifié avec succès\n");
+    } else if (result == 0) {
+        fprintf(stderr, "| Échec de l'authentification du client (Signature invalide)\n");
         const char *response = "Échec de l'authentification du client (Signature invalide)\n";
         send(client_socket, response, strlen(response), 0);
         cJSON_Delete(json);
         close(client_socket);
         return;
     } else {
-        printf("| Client authentifié avec succès\n");
+        fprintf(stderr, "| Erreur lors de l'authentification du client\n");
+        const char *response = "Erreur lors de l'authentification du client\n";
+        send(client_socket, response, strlen(response), 0);
+        cJSON_Delete(json);
+        close(client_socket);
+        return;
     }
 
     // Étape 4 : Sauvegarder/traiter selon le type de données
@@ -382,7 +408,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
             return;
         }
 
-        fwrite(file_data, 1, file_data_len, output);
+        fwrite(content_data, 1, content_data_len, output);
         fclose(output);
 
         printf("Fichier sauvegardé : %s\n", output_file);
@@ -442,9 +468,9 @@ int main() {
     }
 
     if (load_acl(ACL)) {
-        printf("ACL chargée avec succès !\n");
+        printf("ACL chargée avec succès\n");
     } else {
-        printf("Erreur de chargement de l'ACL\n");
+        printf("Erreur lors du chargement de l'ACL\n");
     }
 
     // Vérifier et créer le dossier transfer_dir si nécessaire
