@@ -167,13 +167,17 @@ int is_ip_authorized(const char *client_ip) {
 // Fonction pour vérifier une signature avec une clé publique
 int verify_signature(const unsigned char *content, size_t content_len,
                      const unsigned char *signature, size_t signature_len, 
-                     const char *public_key_path) {
+                     const char *keys_path, const char *client_id) {
 
     char full_public_key_path[512];
-    snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/public_key.pem", public_key_path);
+    snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/%s_pub.pem", keys_path, client_id);
     FILE *pubkey_file = fopen(full_public_key_path, "r");
     if (!pubkey_file) {
-        perror("Erreur d'ouverture de la clé publique");
+        if (errno == ENOENT) {
+            fprintf(stderr, "| /!\\ Fichier de clé publique manquant\n");
+        } else {
+            perror("Erreur d'ouverture de la clé publique");
+        }
         return -1;
     }
 
@@ -208,8 +212,6 @@ int verify_signature(const unsigned char *content, size_t content_len,
         EVP_PKEY_free(pubkey);
         return -1;
     }
-
-    printf("Signature length expected: %d, actual: %zu\n", EVP_PKEY_size(pubkey), signature_len);
 
     int result = EVP_DigestVerifyFinal(mdctx, signature, signature_len);
     EVP_MD_CTX_free(mdctx);
@@ -310,7 +312,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         close(client_socket);
         return;
     } else {
-        printf("| Reception de %ldB de données\n", bytes_received);
+        printf("| Réception de %ldB de données\n", bytes_received);
     }
 
     cJSON *json = cJSON_Parse(buffer);
@@ -353,8 +355,8 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     size_t signature_len = base64_decode(signature_base64, signature);
 
     // Étape 3 : Vérifier la signature avec la clé publique
-    printf("| Authentification du client...\n");
-    int result = verify_signature(content_data, content_data_len, signature, signature_len, keys_path);
+    printf("| Authentification du client %s...\n", client_id);
+    int result = verify_signature(content_data, content_data_len, signature, signature_len, keys_path, client_id);
     if (result == 1) {
         printf("| Client authentifié avec succès\n");
     } else if (result == 0) {
@@ -398,6 +400,10 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     cJSON_Delete(json);
+
+    // Étape 5 : Réponse au client
+    const char *response = "Données reçues avec succès !\n";
+    send(client_socket, response, strlen(response), 0);
     close(client_socket);
 }
 
