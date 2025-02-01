@@ -14,8 +14,9 @@
 #include <unistd.h>
 
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
-#define CLIENT_DATA_BUFFER_SIZE 8192
+#define CLIENT_DATA_BUFFER_SIZE 16384
 #define SIGNATURE_SIZE 1024
+#define AES_KEY_SIZE 32
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
 #define CONFIG_FILE "config.ini"
@@ -164,6 +165,40 @@ int is_ip_authorized(const char *client_ip) {
     return 0;
 }
 
+// Fonction pour extraire le salt d'un contenu chiffré OpenSSL
+int extract_salt(const unsigned char *encrypted_content, unsigned char *salt) {
+    const int HEADER_SIZE = 8;
+    const int SALT_SIZE = 8;
+
+    // Vérification du préfixe "Salted__"
+    char header[HEADER_SIZE];
+
+    memcpy(header, encrypted_content, HEADER_SIZE);
+    
+    // Vérifier que l'en-tête est "Salted__"
+    if (strncmp(header, "Salted__", HEADER_SIZE) != 0) {
+        fprintf(stderr, "En-tête 'Salted__' manquant\n");
+        return -1;
+    }
+    memcpy(salt, encrypted_content + HEADER_SIZE, SALT_SIZE);
+
+    return 0;
+}
+
+// Fonction pour dériver une clé à partir d'un mot de passe et d'un salt
+int derive_key_pbkdf2(const unsigned char *password, size_t password_len,
+                      const unsigned char *salt, size_t salt_len,
+                      unsigned char *key, size_t key_len) {
+    // Dérivation de la clé avec PBKDF2-HMAC
+    int iterations = 10000;  // Nombre d'itérations, tu peux ajuster selon tes besoins
+
+    if (PKCS5_PBKDF2_HMAC((const char *)password, password_len, salt, salt_len, iterations, EVP_sha256(), key_len, key) != 1) {
+        fprintf(stderr, "Erreur de dérivation de la clé avec PBKDF2\n");
+        return -1;
+    }
+    return 1;
+}
+
 // Fonction pour vérifier une signature avec une clé publique
 int verify_signature(const unsigned char *content, size_t content_len,
                      const unsigned char *signature, size_t signature_len, 
@@ -224,6 +259,124 @@ int verify_signature(const unsigned char *content, size_t content_len,
     } else {
         return -1;
     }
+}
+
+// Fonction pour déchiffrer un contenu avec AES-256-CBC
+int decrypt_aes(const unsigned char *encrypted_content, size_t encrypted_len,
+                unsigned char *decrypted_content, size_t *decrypted_len,
+                const unsigned char *password, const unsigned char *salt,
+                const unsigned char *iv) {
+    // Dérivation de la clé à partir du mot de passe et du salt
+    unsigned char key[AES_KEY_SIZE];
+    if (derive_key_pbkdf2(password, strlen((const char *)password), salt, sizeof(salt), key, AES_KEY_SIZE) != 1) {
+        return -1;
+    }
+
+    // Création du contexte de déchiffrement
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        fprintf(stderr, "Erreur de création du contexte de déchiffrement AES\n");
+        return -1;
+    }
+
+    // Initialisation du déchiffrement AES-256-CBC
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
+        fprintf(stderr, "Erreur d'initialisation du déchiffrement AES\n");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+
+    // Ignorer les 16 premiers octets qui contiennent le sel
+    const unsigned char *data_to_decrypt = encrypted_content + 16;
+    size_t data_len = encrypted_len - 16;
+
+    // Déchiffrement
+    int len;
+    if (EVP_DecryptUpdate(ctx, decrypted_content, &len, data_to_decrypt, data_len) != 1) {
+        fprintf(stderr, "Erreur lors du déchiffrement AES\n");
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    *decrypted_len = len;
+
+    // Finalisation du déchiffrement
+    if (EVP_DecryptFinal_ex(ctx, decrypted_content + len, &len) != 1) {
+        fprintf(stderr, "Erreur lors de la finalisation du déchiffrement AES\n");
+
+        unsigned long err_code;
+        while ((err_code = ERR_get_error())) {
+            char err_buf[256];
+            ERR_error_string_n(err_code, err_buf, sizeof(err_buf));
+            fprintf(stderr, "OpenSSL error: %s\n", err_buf);
+        }
+
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    *decrypted_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    return 1;
+}
+
+// Fonction pour déchiffrer un contenu avec une clé privée
+int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
+                    unsigned char *decrypted_content, size_t *decrypted_len,
+                    const char *keys_path) {
+
+    char full_private_key_path[512];
+    snprintf(full_private_key_path, sizeof(full_private_key_path), "%sprivate/server_private.pem", keys_path);
+    FILE *privkey_file = fopen(full_private_key_path, "r");
+    if (!privkey_file) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "| /!\\ Fichier de clé privée manquant\n");
+        } else {
+            perror("Erreur d'ouverture de la clé privée");
+        }
+        return -1;
+    }
+
+    EVP_PKEY *privkey = PEM_read_PrivateKey(privkey_file, NULL, NULL, NULL);
+    fclose(privkey_file);
+
+    if (!privkey) {
+        fprintf(stderr, "Erreur de lecture de la clé privée\n");
+        return -1;
+    }
+
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(privkey, NULL);
+    if (!ctx) {
+        fprintf(stderr, "Erreur de création du contexte de déchiffrement\n");
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_decrypt_init(ctx) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation du déchiffrement\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING);
+    
+    if (EVP_PKEY_decrypt(ctx, NULL, decrypted_len, encrypted_content, encrypted_len) <= 0) {
+        fprintf(stderr, "Erreur lors de la détermination de la taille du contenu déchiffré\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_decrypt(ctx, decrypted_content, decrypted_len, encrypted_content, encrypted_len) <= 0) {
+        fprintf(stderr, "Erreur lors du déchiffrement du contenu\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(privkey);
+    return 1;
 }
 
 // Fonction pour encapsuler un fichier
@@ -315,9 +468,75 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         printf("| Réception de %ldB de données\n", bytes_received);
     }
 
-    cJSON *json = cJSON_Parse(buffer);
+    // Parse the received JSON data
+    cJSON *received_json = cJSON_Parse(buffer);
+    if (!received_json) {
+        fprintf(stderr, "| Erreur de parsing du payload\n");
+        const char *response = "Données reçues au format invalide !\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+        return;
+    }
+
+    // Extract the AES key and payload from the JSON
+    const char *aes_key_base64 = cJSON_GetObjectItem(received_json, "aes_key")->valuestring;
+    const char *aes_iv_base64 = cJSON_GetObjectItem(received_json, "aes_iv")->valuestring;
+    const char *payload_base64 = cJSON_GetObjectItem(received_json, "payload")->valuestring;
+
+    // Decode the base64 content
+    unsigned char aes_key[1024];
+    size_t aes_key_len = base64_decode(aes_key_base64, aes_key);
+
+    unsigned char aes_iv[16];
+    size_t aes_iv_len = base64_decode(aes_iv_base64, aes_iv);
+
+    unsigned char encrypted_payload[CLIENT_DATA_BUFFER_SIZE];
+    size_t encrypted_payload_len = base64_decode(payload_base64, encrypted_payload);
+    
+    unsigned char decrypted_content[CLIENT_DATA_BUFFER_SIZE];
+    size_t decrypted_content_len = sizeof(decrypted_content);
+
+    unsigned char decrypted_aes_key[256];
+    size_t decrypted_aes_key_len = sizeof(decrypted_aes_key);
+
+    unsigned char salt[8];
+
+    // Decrypt the payload using the AES key
+    if (decrypt_rsa(aes_key, aes_key_len, decrypted_aes_key, &decrypted_aes_key_len, keys_path) != 1) {
+        fprintf(stderr, "| Erreur lors du déchiffrement de la clé AES\n");
+        const char *response = "Erreur lors du déchiffrement du contenu\n";
+        send(client_socket, response, strlen(response), 0);
+        cJSON_Delete(received_json);
+        close(client_socket);
+        return;
+    } else {
+        printf("| Clé AES déchiffrée avec succès\n");
+        if (extract_salt(encrypted_payload, salt) != 0) {
+            fprintf(stderr, "| Erreur lors de l'extraction du sel\n");
+            const char *response = "Erreur lors du déchiffrement du contenu\n";
+            send(client_socket, response, strlen(response), 0);
+            cJSON_Delete(received_json);
+            close(client_socket);
+            return;
+        } else {
+            printf("| Sel extrait avec succès\n");
+            if (decrypt_aes(encrypted_payload, encrypted_payload_len, decrypted_content, &decrypted_content_len, decrypted_aes_key, salt, aes_iv) != 1) {
+                fprintf(stderr, "| Erreur lors du déchiffrement du contenu\n");
+                const char *response = "Erreur lors du déchiffrement du contenu\n";
+                send(client_socket, response, strlen(response), 0);
+                cJSON_Delete(received_json);
+                close(client_socket);
+                return;
+            } else {
+                printf("| Contenu déchiffré avec succès\n");
+                cJSON_Delete(received_json);
+            }
+        }
+    }
+
+    cJSON *json = cJSON_Parse(decrypted_content);
     if (!json) {
-        fprintf(stderr, "| Erreur de parsing du JSON\n");
+        fprintf(stderr, "| Erreur de parsing des données\n");
         const char *response = "Données au format invalide !\n";
         send(client_socket, response, strlen(response), 0);
         close(client_socket);
