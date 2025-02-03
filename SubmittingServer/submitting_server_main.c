@@ -474,6 +474,34 @@ unsigned char* read_file(const char *filename, size_t *filesize) {
 
     return content;
 }
+// Fonction pour encoder les données avec Reed-Solomon
+void encode_rs(unsigned char* data, size_t size, unsigned char* encoded) {
+    correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
+    if (!rs) {
+        fprintf(stderr, "Erreur lors de la création de l'encodeur Reed-Solomon\n");
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned char block[BLOCK_SIZE] = {0}; // Initialiser à 0
+    memcpy(block, data, size);
+
+    ssize_t encoded_len = correct_reed_solomon_encode(rs, block, BLOCK_SIZE, encoded);
+    if (encoded_len < 0) {
+        fprintf(stderr, "Erreur d'encodage. Taille encodée: %ld\n", encoded_len);
+        correct_reed_solomon_destroy(rs);
+        exit(EXIT_FAILURE);
+    }
+
+    correct_reed_solomon_destroy(rs);
+}
+
+void introduce_errors(unsigned char* data, int num_errors) {
+    num_errors = num_errors > PARITY_SIZE / 2 ? PARITY_SIZE / 2 : num_errors;
+    for (int i = 0; i < num_errors; i++) {
+        int pos = rand() % ENCODED_SIZE;
+        data[pos] ^= (1 << (rand() % 8));
+    }
+}
 
 // Fonction pour gérer un client
 void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
@@ -635,23 +663,30 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         return;
     }
 
-    // code correcteur d'erreur
-    size_t data_size = strlen((char*)json);
+    // code correcteur d'erreur (char)
+    printf("data de ce qui est envoyé avant l'encodage : %s\n", content_data);
+    unsigned char data_correction[CLIENT_DATA_BUFFER_SIZE];
+    memcpy(data_correction, content_data, CLIENT_DATA_BUFFER_SIZE);
+    size_t data_size = sizeof(data_correction);
     size_t num_block = ((data_size - 1) / BLOCK_SIZE) + 1;
 
     time_t now = time(NULL);
+    char correct_path[256];
+    snprintf(correct_path, sizeof(correct_path), "%s/transfer_%ld", transfer_dir, now);
     
-    FILE *encoded_file = fopen(now, "wb");
+    FILE *encoded_file = fopen(correct_path, "wb");
     if (!encoded_file) {
         perror("Erreur ouverture fichier encodé");
-        return EXIT_FAILURE;
+        cJSON_Delete(json);
+        close(client_socket);
+        return;
     }
 
     for (int i = 0; i < num_block; i++) {
         unsigned char encoded_block_data[ENCODED_SIZE];
         size_t block_size = (i == num_block - 1 && data_size % BLOCK_SIZE != 0) ? data_size % BLOCK_SIZE : BLOCK_SIZE;
         unsigned char block_data[BLOCK_SIZE] = {0};
-        memcpy(block_data, json + i * BLOCK_SIZE, block_size);
+        memcpy(block_data, data_correction + i * BLOCK_SIZE, block_size);
 
         encode_rs(block_data, block_size, encoded_block_data);
         // indroduction d'erreur par block
@@ -697,35 +732,6 @@ int load_config(const char *filename, Config *config) {
 
     fclose(file);
     return 1;
-}
-
-// Fonction pour encoder les données avec Reed-Solomon
-void encode_rs(unsigned char* data, size_t size, unsigned char* encoded) {
-    correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
-    if (!rs) {
-        fprintf(stderr, "Erreur lors de la création de l'encodeur Reed-Solomon\n");
-        exit(EXIT_FAILURE);
-    }
-
-    unsigned char block[BLOCK_SIZE] = {0}; // Initialiser à 0
-    memcpy(block, data, size);
-
-    ssize_t encoded_len = correct_reed_solomon_encode(rs, block, BLOCK_SIZE, encoded);
-    if (encoded_len < 0) {
-        fprintf(stderr, "Erreur d'encodage. Taille encodée: %ld\n", encoded_len);
-        correct_reed_solomon_destroy(rs);
-        exit(EXIT_FAILURE);
-    }
-
-    correct_reed_solomon_destroy(rs);
-}
-
-void introduce_errors(unsigned char* data, int num_errors) {
-    num_errors = num_errors > PARITY_SIZE / 2 ? PARITY_SIZE / 2 : num_errors;
-    for (int i = 0; i < num_errors; i++) {
-        int pos = rand() % ENCODED_SIZE;
-        data[pos] ^= (1 << (rand() % 8));
-    }
 }
 
 int main() {
