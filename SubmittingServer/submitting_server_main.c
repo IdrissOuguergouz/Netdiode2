@@ -16,6 +16,7 @@
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
 #define CLIENT_DATA_BUFFER_SIZE 16384
 #define SIGNATURE_SIZE 1024
+#define AES_BLOCK_SIZE 16
 #define AES_KEY_SIZE 32
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
@@ -319,6 +320,101 @@ int decrypt_aes(const unsigned char *encrypted_content, size_t encrypted_len,
     return 1;
 }
 
+// Fonction pour déchiffrer un flux de donnée avec AES-256-CBC
+int decrypt_aes_stream(int socket_fd, const unsigned char *password,
+                       const unsigned char *iv, const char *output_file) {
+    unsigned char buffer[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char decrypted_buffer[CLIENT_DATA_BUFFER_SIZE + AES_BLOCK_SIZE];  // Prévoir un tampon plus grand pour le padding
+    FILE *output = fopen(output_file, "wb");
+    if (!output) {
+        perror("Erreur d'ouverture du fichier de sortie");
+        return -1;
+    }
+
+    unsigned char salt[AES_BLOCK_SIZE];
+    size_t total_decrypted_len = 0;
+    int is_first_chunk = 1;
+
+    // Création du contexte de déchiffrement
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        fprintf(stderr, "Erreur de création du contexte de déchiffrement\n");
+        fclose(output);
+        return -1;
+    }
+
+    while (1) {
+        // Lecture d'un chunk de données chiffrées
+        int bytes_received = recv(socket_fd, buffer, sizeof(buffer), 0);
+        if (bytes_received <= 0) {
+            break;  // Fin de la transmission ou erreur
+        }
+
+        size_t decrypted_len = 0;
+
+        if (is_first_chunk) {
+            // Extraire le salt des 16 premiers octets du premier chunk
+            memcpy(salt, buffer, AES_BLOCK_SIZE);
+            size_t encrypted_len = bytes_received - AES_BLOCK_SIZE;
+
+            // Dérivation de la clé à partir du mot de passe et du salt
+            unsigned char key[AES_KEY_SIZE];
+            if (derive_key_pbkdf2(password, strlen((const char *)password), salt, sizeof(salt), key, AES_KEY_SIZE) != 1) {
+                fclose(output);
+                EVP_CIPHER_CTX_free(ctx);
+                return -1;
+            }
+
+            // Initialisation du déchiffrement AES-256-CBC
+            if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv) != 1) {
+                fprintf(stderr, "Erreur d'initialisation du déchiffrement AES\n");
+                fclose(output);
+                EVP_CIPHER_CTX_free(ctx);
+                return -1;
+            }
+
+            // Déchiffrement du premier chunk après avoir retiré le salt
+            if (EVP_DecryptUpdate(ctx, decrypted_buffer, (int *)&decrypted_len, buffer + AES_BLOCK_SIZE, encrypted_len) != 1) {
+                fprintf(stderr, "Erreur lors du déchiffrement AES\n");
+                fclose(output);
+                EVP_CIPHER_CTX_free(ctx);
+                return -1;
+            }
+
+            is_first_chunk = 0;
+        } else {
+            // Déchiffrement des autres chunks sans salt
+            if (EVP_DecryptUpdate(ctx, decrypted_buffer, (int *)&decrypted_len, buffer, bytes_received) != 1) {
+                fprintf(stderr, "Erreur lors du déchiffrement AES\n");
+                fclose(output);
+                EVP_CIPHER_CTX_free(ctx);
+                return -1;
+            }
+        }
+
+        // Écriture des données déchiffrées dans le fichier de sortie
+        fwrite(decrypted_buffer, 1, decrypted_len, output);
+        total_decrypted_len += decrypted_len;
+    }
+
+    // Finalisation du déchiffrement
+    int final_len = 0;
+    if (EVP_DecryptFinal_ex(ctx, decrypted_buffer + total_decrypted_len, &final_len) != 1) {
+        fprintf(stderr, "Erreur lors de la finalisation du déchiffrement AES\n");
+        fclose(output);
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+    fwrite(decrypted_buffer, 1, final_len, output);
+    total_decrypted_len += final_len;
+
+    fclose(output);
+    EVP_CIPHER_CTX_free(ctx);
+
+    printf("Fichier déchiffré avec succès, taille totale : %zu octets\n", total_decrypted_len);
+    return 1;
+}
+
 // Fonction pour déchiffrer un contenu avec une clé privée
 int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
                     unsigned char *decrypted_content, size_t *decrypted_len,
@@ -358,7 +454,7 @@ int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
         return -1;
     }
 
-    EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING);
+    EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING); //TODO changer en RSA_PKCS1_OAEP_PADDING
     
     if (EVP_PKEY_decrypt(ctx, NULL, decrypted_len, encrypted_content, encrypted_len) <= 0) {
         fprintf(stderr, "Erreur lors de la détermination de la taille du contenu déchiffré\n");
@@ -438,6 +534,8 @@ void encapsulate_file(const char *original_file, const char *recipient, const ch
 void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
     char buffer[CLIENT_DATA_BUFFER_SIZE];
     size_t bytes_received;
+    unsigned char aes_key[256];  // Espace pour la clé AES
+    unsigned char aes_iv[16];    // Espace pour l'IV
 
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -459,7 +557,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     // Étape 2 : Réception des données
-    bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+    bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) {
         fprintf(stderr, "| Erreur lors de la réception des données\n");
         close(client_socket);
@@ -468,71 +566,85 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         printf("| Réception de %ldB de données\n", bytes_received);
     }
 
-    // Parse the received JSON data
-    cJSON *received_json = cJSON_Parse(buffer);
-    if (!received_json) {
-        fprintf(stderr, "| Erreur de parsing du payload\n");
-        const char *response = "Données reçues au format invalide !\n";
+    // Vérification si les premiers octets contiennent bien la clé et l'IV
+    if (bytes_received < 32) {  // 32 octets = 256 bits pour la clé + 16 octets pour l'IV
+        fprintf(stderr, "| Données reçues incomplètes (clé AES ou IV manquants)\n");
+        const char *response = "Erreur : données incomplètes\n";
         send(client_socket, response, strlen(response), 0);
         close(client_socket);
         return;
     }
 
-    // Extract the AES key and payload from the JSON
-    const char *aes_key_base64 = cJSON_GetObjectItem(received_json, "aes_key")->valuestring;
-    const char *aes_iv_base64 = cJSON_GetObjectItem(received_json, "aes_iv")->valuestring;
-    const char *payload_base64 = cJSON_GetObjectItem(received_json, "payload")->valuestring;
+    // Extraire la clé AES et l'IV du buffer
+    memcpy(aes_key, buffer, 256 / 8);   // 256 bits pour la clé AES
+    memcpy(aes_iv, buffer + 256 / 8, 16); // 16 octets pour l'IV
 
-    // Decode the base64 content
-    unsigned char aes_key[1024];
-    size_t aes_key_len = base64_decode(aes_key_base64, aes_key);
-
-    unsigned char aes_iv[16];
-    size_t aes_iv_len = base64_decode(aes_iv_base64, aes_iv);
-
-    unsigned char encrypted_payload[CLIENT_DATA_BUFFER_SIZE];
-    size_t encrypted_payload_len = base64_decode(payload_base64, encrypted_payload);
-    
-    unsigned char decrypted_content[CLIENT_DATA_BUFFER_SIZE];
-    size_t decrypted_content_len = sizeof(decrypted_content);
-
+    // Déchiffrer la clé AES avec RSA
     unsigned char decrypted_aes_key[256];
-    size_t decrypted_aes_key_len = sizeof(decrypted_aes_key);
-
-    unsigned char salt[8];
-
-    // Decrypt the payload using the AES key
-    if (decrypt_rsa(aes_key, aes_key_len, decrypted_aes_key, &decrypted_aes_key_len, keys_path) != 1) {
+    size_t decrypted_aes_key_len;
+    if (decrypt_rsa(aes_key, 256 / 8, decrypted_aes_key, &decrypted_aes_key_len, keys_path) != 1) {
         fprintf(stderr, "| Erreur lors du déchiffrement de la clé AES\n");
+        const char *response = "Erreur lors du déchiffrement de la clé AES\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+        return;
+    }
+
+    // Créer un nom de fichier unique
+    char output_file_path[256];
+    snprintf(output_file_path, sizeof(output_file_path), "%s/received_file_%ld.bin", transfer_dir, time(NULL));
+
+    // Ouvrir le fichier pour l'écriture
+    FILE *output_file = fopen(output_file_path, "wb");
+    if (!output_file) {
+        perror("Erreur d'ouverture du fichier de sortie");
+        const char *response = "Erreur lors de l'ouverture du fichier de sortie\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+        return;
+    }
+
+    // Étape 3 : Déchiffrement du payload en streaming
+    if (decrypt_aes_stream(client_socket, decrypted_aes_key, aes_iv, (char *)output_file) != 1) {
+        fprintf(stderr, "| Erreur lors du déchiffrement du contenu\n");
         const char *response = "Erreur lors du déchiffrement du contenu\n";
         send(client_socket, response, strlen(response), 0);
-        cJSON_Delete(received_json);
+        fclose(output_file);
         close(client_socket);
         return;
-    } else {
-        printf("| Clé AES déchiffrée avec succès\n");
-        if (extract_salt(encrypted_payload, salt) != 0) {
-            fprintf(stderr, "| Erreur lors de l'extraction du sel\n");
-            const char *response = "Erreur lors du déchiffrement du contenu\n";
-            send(client_socket, response, strlen(response), 0);
-            cJSON_Delete(received_json);
-            close(client_socket);
-            return;
-        } else {
-            printf("| Sel extrait avec succès\n");
-            if (decrypt_aes(encrypted_payload, encrypted_payload_len, decrypted_content, &decrypted_content_len, decrypted_aes_key, salt, aes_iv) != 1) {
-                fprintf(stderr, "| Erreur lors du déchiffrement du contenu\n");
-                const char *response = "Erreur lors du déchiffrement du contenu\n";
-                send(client_socket, response, strlen(response), 0);
-                cJSON_Delete(received_json);
-                close(client_socket);
-                return;
-            } else {
-                printf("| Contenu déchiffré avec succès\n");
-                cJSON_Delete(received_json);
-            }
-        }
     }
+
+    printf("| Contenu déchiffré avec succès et sauvegardé dans %s\n", output_file_path);
+    fclose(output_file);
+
+    // Lire le contenu déchiffré depuis le fichier de sortie
+    FILE *decrypted_file = fopen(output_file_path, "rb");
+    if (!decrypted_file) {
+        perror("Erreur d'ouverture du fichier déchiffré");
+        const char *response = "Erreur lors de l'ouverture du fichier déchiffré\n";
+        send(client_socket, response, strlen(response), 0);
+        close(client_socket);
+        return;
+    }
+
+    fseek(decrypted_file, 0, SEEK_END);
+    long decrypted_file_size = ftell(decrypted_file);
+    fseek(decrypted_file, 0, SEEK_SET);
+
+    unsigned char *decrypted_content = malloc(decrypted_file_size + 1);
+    if (!decrypted_content) {
+        perror("Erreur d'allocation mémoire pour le contenu déchiffré");
+        const char *response = "Erreur d'allocation mémoire\n";
+        send(client_socket, response, strlen(response), 0);
+        fclose(decrypted_file);
+        close(client_socket);
+        return;
+    }
+
+    fread(decrypted_content, 1, decrypted_file_size, decrypted_file);
+    decrypted_content[decrypted_file_size] = '\0'; // Assurer la terminaison de la chaîne
+
+    fclose(decrypted_file);
 
     cJSON *json = cJSON_Parse(decrypted_content);
     if (!json) {
