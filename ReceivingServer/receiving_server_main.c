@@ -14,6 +14,10 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include "correct.h"
+#include <sys/inotify.h>
+#include <limits.h>
+#include <sys/select.h>
 
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
 #define CLIENT_DATA_BUFFER_SIZE 16384
@@ -24,6 +28,15 @@
 #define CONFIG_FILE "config.ini"
 #define MAX_IP_ENTRIES 1000
 #define ACL "ACL.txt"
+#define PARITY_SIZE 32  // Nombre d'octets de parité
+#define BLOCK_SIZE 223  // Taille des données utiles dans un bloc
+#define ENCODED_SIZE 255 // Taille totale après encodage (223 + 32)
+#define MAX_FILES 100
+#ifndef NAME_MAX
+#define NAME_MAX 255  // Défaut si NAME_MAX n'est pas défini
+#endif
+#define EVENT_SIZE (sizeof(struct inotify_event))
+#define BUF_LEN (1024 * (EVENT_SIZE + NAME_MAX + 1))
 
 // Structure pour l'en-tête du fichier encapsulé
 typedef struct {
@@ -631,6 +644,190 @@ int load_config(const char *filename, Config *config) {
     return 1;
 }
 
+unsigned char* read_file(const char *filename, size_t *filesize) {
+    FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
+    if (!file) {
+        perror("Erreur d'ouverture");
+        return NULL;
+    }
+
+    // Obtenir la taille du fichier
+    fseek(file, 0, SEEK_END);
+    *filesize = ftell(file);  // On stocke la taille dans la variable pointée
+    rewind(file);
+
+    // Allouer la mémoire
+    unsigned char *content = (unsigned char*)malloc(*filesize + 1);
+    if (!content) {
+        perror("Erreur d'allocation");
+        fclose(file);
+        return NULL;
+    }
+
+    // Lire le fichier en mémoire
+    size_t read_size = fread(content, 1, *filesize, file);
+    fclose(file);
+
+    // Vérifier que toute la lecture s'est bien passée
+    if (read_size != *filesize) {
+        fprintf(stderr, "Erreur de lecture du fichier : attendu %zu, lu %zu\n", *filesize, read_size);
+        free(content);
+        return NULL;
+    }
+
+    // Ajouter un caractère de fin de chaîne (utile pour les fichiers texte)
+    content[*filesize] = '\0';
+
+    return content;
+}
+
+void watch_directory(const char *watch_dir) {
+    int fd = inotify_init();
+    if (fd < 0) {
+        perror("inotify_init");
+        exit(1);
+    }
+
+    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE);
+    if (wd < 0) {
+        perror("inotify_add_watch");
+        exit(1);
+    }
+
+    char buffer[sizeof(struct inotify_event) + NAME_MAX + 1];
+
+    while (1) {
+        ssize_t length = read(fd, buffer, sizeof(buffer));
+        if (length < 0) {
+            perror("read");
+            break;
+        }
+
+        struct inotify_event *event = (struct inotify_event *)buffer;
+        if (event->mask & IN_CREATE) {
+            printf("%s\n", event->name);  // Affiche uniquement le nom du fichier
+        }
+    }
+
+    close(fd);
+}
+
+int watch_directory_nonblocking(const char *watch_dir) {
+    int fd = inotify_init1(IN_NONBLOCK); // Mode non bloquant
+    if (fd < 0) {
+        perror("inotify_init1");
+        return -1;
+    }
+
+    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE);
+    if (wd < 0) {
+        perror("inotify_add_watch");
+        close(fd);
+        return -1;
+    }
+
+    return fd; // Retourne le descripteur pour surveillance
+}
+
+int check_new_files(int inotify_fd, char *filename, size_t max_len) {
+    char buffer[BUF_LEN];
+    ssize_t length = read(inotify_fd, buffer, BUF_LEN);
+
+    if (length < 0) {
+        if (errno == EAGAIN) {
+            // Aucune donnée prête, c'est normal en mode non-bloquant
+            return 0;
+        } else {
+            perror("Erreur inotify read");
+            return 0;
+        }
+    }
+
+    if (length == 0) {
+        printf("Aucun événement détecté.\n");
+        return 0; // Aucune donnée à traiter
+    }
+
+    if (length > 0) {
+        struct inotify_event *event;
+        for (char *ptr = buffer; ptr < buffer + length;
+             ptr += EVENT_SIZE + event->len) {
+            event = (struct inotify_event *)ptr;
+            if ((event->mask & IN_CREATE) && event->len > 0) {
+                strncpy(filename, event->name, max_len - 1);
+                filename[max_len - 1] = '\0'; // Sécurité pour éviter un buffer overflow
+                return 1; // Fichier détecté
+            }
+        }
+    }
+    return 0; // Aucun fichier détecté
+}
+
+// Fonction pour décoder les données avec Reed-Solomon
+int decode_rs(unsigned char* received, unsigned char* decoded) {
+    correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
+    if (!rs) {
+        fprintf(stderr, "Erreur lors de la création du décodeur Reed-Solomon\n");
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned char block[ENCODED_SIZE] = {0};
+    ssize_t decoded_len = correct_reed_solomon_decode(rs, received, ENCODED_SIZE, block);
+
+    if (decoded_len < 0) {
+        fprintf(stderr, "Erreur de décodage. Taille décodée: %ld\n", decoded_len);
+        correct_reed_solomon_destroy(rs);
+        exit(EXIT_FAILURE);
+    }
+
+    memcpy(decoded, block, decoded_len);  // Copier seulement les octets valides
+    decoded[decoded_len] = '\0';  // Assurer la fin de la chaîne
+
+    correct_reed_solomon_destroy(rs);
+    return 0;
+}
+
+void decode(const char *fullpath_filename){
+    // Décodage correcteur du fichier
+    size_t file_size;
+    unsigned char* encoded_data = read_file(fullpath_filename, &file_size);
+    if (!encoded_data) {
+        perror("Erreur de lecture du fichier encodé");
+        return;
+    }
+    
+    FILE *decoded_file = fopen("decoded_data", "wb");
+    if (!decoded_file) {
+        perror("Erreur ouverture fichier décodé");
+        return;
+    }
+
+    size_t num_block_decode = file_size / ENCODED_SIZE;
+
+    for (int i = 0; i < num_block_decode; i++) {
+        unsigned char decoded_block_data[BLOCK_SIZE + 1]; // prendre en compte le caractère de fin de chaîne
+        unsigned char block_data[ENCODED_SIZE] = {0};
+        memcpy(block_data, encoded_data + i * ENCODED_SIZE, ENCODED_SIZE);
+
+        decode_rs(block_data, decoded_block_data);
+
+        unsigned char block_data_decode[BLOCK_SIZE] = {0};
+        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); // Copier tout sans le caractère de fin de chaîne
+        printf("Bloc %d: %s\n", i, block_data_decode);
+        if (i == num_block_decode - 1) {
+            // supprimer les octets de bourrage
+            size_t last_block_size = strlen((char*)block_data_decode);
+            fwrite(block_data_decode, last_block_size, 1, decoded_file);
+            break;
+        }
+        else{
+            fwrite(decoded_block_data, BLOCK_SIZE, 1, decoded_file);
+        }
+    }
+
+    fclose(decoded_file);
+}
+
 int main() {
     Config config;
     printf("Démarrage du serveur GhostTransfer...\n");
@@ -732,12 +929,48 @@ int main() {
     printf("Serveur en écoute sur le port %d...\n", config.port);
     printf("PID du processus : %d\n", getpid());
 
+    int inotify_fd = watch_directory_nonblocking(config.transfer_dir);
+    if (inotify_fd < 0) {
+        return EXIT_FAILURE;
+    }
+
     while (1) {
+    char new_filename[NAME_MAX + 1] = {0};
+
+    // Initialiser fd_set pour select
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(inotify_fd, &readfds);
+    FD_SET(server_socket, &readfds);
+
+    // Attente de l'événement (inotify ou connexion client)
+    struct timeval timeout = {0, 100000};  // Timeout de 100 ms (réglable)
+    int ready_fds = select(FD_SETSIZE, &readfds, NULL, NULL, &timeout);
+
+    if (ready_fds < 0) {
+        perror("Erreur select");
+        return EXIT_FAILURE;
+    }
+
+    // Vérifier si un événement inotify est prêt
+    if (FD_ISSET(inotify_fd, &readfds)) {
+        if (check_new_files(inotify_fd, new_filename, sizeof(new_filename))) {
+            printf("Nouveau fichier créé : %s\n", new_filename);
+            // Path complet du fichier
+            char full_path[512];
+            snprintf(full_path, sizeof(full_path), "%s/%s", config.transfer_dir, new_filename);
+            decode(full_path);
+        }
+    }
+
+    // Vérifier si une connexion client est prête
+    if (FD_ISSET(server_socket, &readfds)) {
         int client_socket = accept(server_socket, NULL, NULL);
         if (client_socket >= 0) {
             handle_client(client_socket, config.keys_path, config.transfer_dir);
         }
     }
+}
 
     close(server_socket);
     return 0;
