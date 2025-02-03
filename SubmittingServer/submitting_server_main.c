@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "correct.h"
 
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
 #define CLIENT_DATA_BUFFER_SIZE 16384
@@ -22,6 +23,9 @@
 #define CONFIG_FILE "config.ini"
 #define MAX_IP_ENTRIES 1000
 #define ACL "ACL.txt"
+#define PARITY_SIZE 32  // Nombre d'octets de parité
+#define BLOCK_SIZE 223  // Taille des données utiles dans un bloc
+#define ENCODED_SIZE 255 // Taille totale après encodage (223 + 32)
 
 // Structure pour l'en-tête du fichier encapsulé
 typedef struct {
@@ -434,6 +438,43 @@ void encapsulate_file(const char *original_file, const char *recipient, const ch
     printf("Fichier encapsulé créé : %s\n", output_file);
 }
 
+unsigned char* read_file(const char *filename, size_t *filesize) {
+    FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
+    if (!file) {
+        perror("Erreur d'ouverture");
+        return NULL;
+    }
+
+    // Obtenir la taille du fichier
+    fseek(file, 0, SEEK_END);
+    *filesize = ftell(file);  // On stocke la taille dans la variable pointée
+    rewind(file);
+
+    // Allouer la mémoire
+    unsigned char *content = (unsigned char*)malloc(*filesize + 1);
+    if (!content) {
+        perror("Erreur d'allocation");
+        fclose(file);
+        return NULL;
+    }
+
+    // Lire le fichier en mémoire
+    size_t read_size = fread(content, 1, *filesize, file);
+    fclose(file);
+
+    // Vérifier que toute la lecture s'est bien passée
+    if (read_size != *filesize) {
+        fprintf(stderr, "Erreur de lecture du fichier : attendu %zu, lu %zu\n", *filesize, read_size);
+        free(content);
+        return NULL;
+    }
+
+    // Ajouter un caractère de fin de chaîne (utile pour les fichiers texte)
+    content[*filesize] = '\0';
+
+    return content;
+}
+
 // Fonction pour gérer un client
 void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
     char buffer[CLIENT_DATA_BUFFER_SIZE];
@@ -594,29 +635,32 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         return;
     }
 
-    // Étape 4 : Sauvegarder/traiter selon le type de données
-    if (strcmp(data_type, "FILE") == 0) {
-        char output_file[CLIENT_DATA_BUFFER_SIZE];
-        snprintf(output_file, sizeof(output_file), "received_file_%ld.bin", time(NULL));
+    // code correcteur d'erreur
+    size_t data_size = strlen((char*)json);
+    size_t num_block = ((data_size - 1) / BLOCK_SIZE) + 1;
 
-        FILE *output = fopen(output_file, "wb");
-        if (!output) {
-            perror("Erreur d'ecriture du fichier");
-            cJSON_Delete(json);
-            close(client_socket);
-            return;
-        }
-
-        fwrite(content_data, 1, content_data_len, output);
-        fclose(output);
-
-        printf("Fichier sauvegardé : %s\n", output_file);
-    } else if (strcmp(data_type, "MAIL") == 0) {
-        printf("Traitement des mails non implémenté\n");
-        // TODO : Ajouter un traitement spécifique pour les mails.
-    } else {
-        fprintf(stderr, "Type de données inconnu : %s\n", data_type);
+    time_t now = time(NULL);
+    
+    FILE *encoded_file = fopen(now, "wb");
+    if (!encoded_file) {
+        perror("Erreur ouverture fichier encodé");
+        return EXIT_FAILURE;
     }
+
+    for (int i = 0; i < num_block; i++) {
+        unsigned char encoded_block_data[ENCODED_SIZE];
+        size_t block_size = (i == num_block - 1 && data_size % BLOCK_SIZE != 0) ? data_size % BLOCK_SIZE : BLOCK_SIZE;
+        unsigned char block_data[BLOCK_SIZE] = {0};
+        memcpy(block_data, json + i * BLOCK_SIZE, block_size);
+
+        encode_rs(block_data, block_size, encoded_block_data);
+        // indroduction d'erreur par block
+        introduce_errors(encoded_block_data, 0);
+
+        fwrite(encoded_block_data, ENCODED_SIZE, 1, encoded_file);
+    }
+
+    fclose(encoded_file);
 
     cJSON_Delete(json);
 
@@ -653,6 +697,35 @@ int load_config(const char *filename, Config *config) {
 
     fclose(file);
     return 1;
+}
+
+// Fonction pour encoder les données avec Reed-Solomon
+void encode_rs(unsigned char* data, size_t size, unsigned char* encoded) {
+    correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
+    if (!rs) {
+        fprintf(stderr, "Erreur lors de la création de l'encodeur Reed-Solomon\n");
+        exit(EXIT_FAILURE);
+    }
+
+    unsigned char block[BLOCK_SIZE] = {0}; // Initialiser à 0
+    memcpy(block, data, size);
+
+    ssize_t encoded_len = correct_reed_solomon_encode(rs, block, BLOCK_SIZE, encoded);
+    if (encoded_len < 0) {
+        fprintf(stderr, "Erreur d'encodage. Taille encodée: %ld\n", encoded_len);
+        correct_reed_solomon_destroy(rs);
+        exit(EXIT_FAILURE);
+    }
+
+    correct_reed_solomon_destroy(rs);
+}
+
+void introduce_errors(unsigned char* data, int num_errors) {
+    num_errors = num_errors > PARITY_SIZE / 2 ? PARITY_SIZE / 2 : num_errors;
+    for (int i = 0; i < num_errors; i++) {
+        int pos = rand() % ENCODED_SIZE;
+        data[pos] ^= (1 << (rand() % 8));
+    }
 }
 
 int main() {
