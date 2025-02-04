@@ -564,14 +564,22 @@ int encrypt_payload(const char *payload, size_t payload_len, char *encrypted_pay
     unsigned char aes_key[AES_KEY_SIZE], aes_iv[AES_IV_SIZE];
     generate_aes_key_iv(aes_key, aes_iv);
 
-    printf("Clé AES générée: %s\n", aes_key);
+    printf("Clé AES générée: ");
+    for (size_t i = 0; i < sizeof(aes_key); i++) {
+        printf("%02x", (unsigned char)aes_key[i]);
+    }
+    printf("\n");
     char encrypted_aes_key[512];
     size_t encrypted_aes_key_len;
     if (encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id) != 1) {
         fprintf(stderr, "Erreur lors du chiffrement de la clé AES avec RSA\n");
         return -1;
     }
-    printf("Clé AES chiffrée avec RSA: %s\n", encrypted_aes_key);
+    printf("Clé AES chiffrée avec RSA: ");
+    for (size_t i = 0; i < encrypted_aes_key_len; i++) {
+        printf("%02x", (unsigned char)encrypted_aes_key[i]);
+    }
+    printf("\n");
 
     // Chiffrement du JSON original avec AES-256-CBC + Salted__
     unsigned char ciphertext[SERVER_BUFFER_SIZE];
