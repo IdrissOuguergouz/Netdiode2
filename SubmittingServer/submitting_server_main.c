@@ -625,15 +625,76 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         return;
     }
 
-    const char *filename = cJSON_GetObjectItem(metadata, "filename")->valuestring;
-    const char *filesize = cJSON_GetObjectItem(metadata, "filesize")->valuestring;
-    const char *data_type = cJSON_GetObjectItem(metadata, "data_type")->valuestring;
-    const char *recipient = cJSON_GetObjectItem(metadata, "recipient")->valuestring;
+    // Vérification et récupération des champs individuellement
+    int error_flag = 0;
 
-    // Extraire les données encodées du fichier
-    const char *content_data_base64 = cJSON_GetObjectItem(json, "content")->valuestring;
-    const char *signature_base64 = cJSON_GetObjectItem(json, "signature")->valuestring;
-    const char *client_id = cJSON_GetObjectItem(json, "client_id")->valuestring;
+    cJSON *json_filename = cJSON_GetObjectItem(metadata, "filename");
+    if (!json_filename || !cJSON_IsString(json_filename)) {
+        fprintf(stderr, "| Erreur : Champ 'filename' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_filesize = cJSON_GetObjectItem(metadata, "filesize");
+    if (!json_filesize || !cJSON_IsNumber(json_filesize)) {
+        fprintf(stderr, "| Erreur : Champ 'filesize' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_data_type = cJSON_GetObjectItem(metadata, "data_type");
+    if (!json_data_type || !cJSON_IsString(json_data_type)) {
+        fprintf(stderr, "| Erreur : Champ 'data_type' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_recipient = cJSON_GetObjectItem(metadata, "recipient");
+    if (!json_recipient || !cJSON_IsString(json_recipient)) {
+        fprintf(stderr, "| Erreur : Champ 'recipient' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_content = cJSON_GetObjectItem(json, "content");
+    if (!json_content || !cJSON_IsString(json_content)) {
+        fprintf(stderr, "| Erreur : Champ 'content' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_signature = cJSON_GetObjectItem(json, "signature");
+    if (!json_signature || !cJSON_IsString(json_signature)) {
+        fprintf(stderr, "| Erreur : Champ 'signature' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    cJSON *json_client_id = cJSON_GetObjectItem(json, "client_id");
+    if (!json_client_id || !cJSON_IsString(json_client_id)) {
+        fprintf(stderr, "| Erreur : Champ 'client_id' manquant ou invalide\n");
+        error_flag = 1;
+    }
+
+    // Si une erreur a été détectée, renvoyer une réponse et fermer la connexion
+    if (error_flag) {
+        const char *response = "Données JSON invalides !\n";
+        send(client_socket, response, strlen(response), 0);
+        cJSON_Delete(json);
+        close(client_socket);
+        return;
+    }
+
+    // Récupération des valeurs après validation
+    const char *filename = json_filename->valuestring;
+    int filesize = json_filesize->valueint;
+    const char *data_type = json_data_type->valuestring;
+    const char *recipient = json_recipient->valuestring;
+    const char *content_data_base64 = json_content->valuestring;
+    const char *signature_base64 = json_signature->valuestring;
+    const char *client_id = json_client_id->valuestring;
+
+    // Affichage des valeurs récupérées
+    printf("| Métadonnées récupérées avec succès :\n");
+    printf("  - Filename : %s\n", filename);
+    printf("  - Filesize : %d\n", filesize);
+    printf("  - Data Type : %s\n", data_type);
+    printf("  - Recipient : %s\n", recipient);
+    printf("  - Client ID : %s\n", client_id);
 
     // Décodage de base64 des données fichier et de la signature
     unsigned char content_data[CLIENT_DATA_BUFFER_SIZE];
