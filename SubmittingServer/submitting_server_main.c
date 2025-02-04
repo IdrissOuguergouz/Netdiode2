@@ -15,7 +15,7 @@
 #include "correct.h"
 
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
-#define CLIENT_DATA_BUFFER_SIZE 16384
+#define SERVER_BUFFER_SIZE 16384
 #define SIGNATURE_SIZE 1024
 #define AES_KEY_SIZE 32
 #define MAGIC_NUMBER 0xABCD1234
@@ -518,7 +518,7 @@ void introduce_errors(unsigned char* data, int num_errors) {
 
 // Fonction pour gérer un client
 void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
-    char buffer[CLIENT_DATA_BUFFER_SIZE];
+    char buffer[SERVER_BUFFER_SIZE];
     size_t bytes_received;
 
     struct sockaddr_in client_addr;
@@ -572,10 +572,10 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     unsigned char aes_iv[16];
     size_t aes_iv_len = base64_decode(aes_iv_base64, aes_iv);
 
-    unsigned char encrypted_payload[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char encrypted_payload[SERVER_BUFFER_SIZE];
     size_t encrypted_payload_len = base64_decode(payload_base64, encrypted_payload);
     
-    unsigned char decrypted_content[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char decrypted_content[SERVER_BUFFER_SIZE];
     size_t decrypted_content_len = sizeof(decrypted_content);
 
     unsigned char decrypted_aes_key[256];
@@ -710,7 +710,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     printf("  - Client ID : %s\n", client_id);
 
     // Décodage de base64 des données fichier et de la signature
-    unsigned char content_data[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char content_data[SERVER_BUFFER_SIZE];
     size_t content_data_len = base64_decode(content_data_base64, content_data);
 
     unsigned char signature[SIGNATURE_SIZE];
@@ -738,7 +738,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     // Etape 4 : Encodage des données pour la correction d'erreurs
-    unsigned char data_correction[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char data_correction[SERVER_BUFFER_SIZE];
     memcpy(data_correction, content_data, content_data_len);
     size_t data_size = sizeof(data_correction);
     size_t num_block = ((data_size - 1) / BLOCK_SIZE) + 1;

@@ -21,9 +21,10 @@
 #include <sys/select.h>
 
 //TODO envisager de permettre la lecture de fichier volumineux en les découpants en plusieurs requêtes pour ne pas avoir un buffer trop grand
-#define CLIENT_DATA_BUFFER_SIZE 16384
+#define SERVER_BUFFER_SIZE 16384
 #define SIGNATURE_SIZE 1024
 #define AES_KEY_SIZE 32
+#define AES_IV_SIZE 16
 #define MAGIC_NUMBER 0xABCD1234
 #define MAX_DEST_SIZE 64
 #define CONFIG_FILE "config.ini"
@@ -132,7 +133,7 @@ void send_file(int client_socket, const char *file_path) {
         return;
     }
 
-    char buffer[CLIENT_DATA_BUFFER_SIZE];
+    char buffer[SERVER_BUFFER_SIZE];
     ssize_t bytes_read;
     while ((bytes_read = read(file_fd, buffer, sizeof(buffer))) > 0) {
         if (send(client_socket, buffer, bytes_read, 0) < 0) {
@@ -143,35 +144,6 @@ void send_file(int client_socket, const char *file_path) {
     }
 
     close(file_fd);
-}
-
-// Fonction pour calculer le hash SHA-256 d'une chaîne de caractères
-void compute_hash(const char *input, uint8_t *hash) {
-    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
-    if (!mdctx) {
-        fprintf(stderr, "Erreur de création du contexte de hash\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) <= 0) {
-        fprintf(stderr, "Erreur d'initialisation du hash\n");
-        EVP_MD_CTX_free(mdctx);
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_DigestUpdate(mdctx, input, strlen(input)) <= 0) {
-        fprintf(stderr, "Erreur de mise à jour du hash\n");
-        EVP_MD_CTX_free(mdctx);
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_DigestFinal_ex(mdctx, hash, NULL) <= 0) {
-        fprintf(stderr, "Erreur de finalisation du hash\n");
-        EVP_MD_CTX_free(mdctx);
-        exit(EXIT_FAILURE);
-    }
-
-    EVP_MD_CTX_free(mdctx);
 }
 
 size_t base64_decode(const char *input, unsigned char *output) {
@@ -234,6 +206,176 @@ int derive_key_pbkdf2(const unsigned char *password, size_t password_len,
         return -1;
     }
     return 1;
+}
+
+// Fonction pour générer une clé AES et un IV
+void generate_aes_key_iv(unsigned char *key, unsigned char *iv) {
+    RAND_bytes(key, AES_KEY_SIZE);
+    RAND_bytes(iv, AES_IV_SIZE);
+}
+
+// Fonction pour chiffrer avec AES-256-CBC et ajouter l'en-tête "Salted__"
+int encrypt_aes(const unsigned char *plaintext, size_t plaintext_len,
+                unsigned char *ciphertext, unsigned char *key, unsigned char *iv) {
+    
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+
+    // Générer un sel aléatoire de 8 octets
+    unsigned char salt[8];
+    RAND_bytes(salt, sizeof(salt));
+
+    // Ajouter l'en-tête "Salted__" suivi du sel
+    memcpy(ciphertext, "Salted__", 8);
+    memcpy(ciphertext + 8, salt, 8);
+
+    // Initialiser le chiffrement avec PBKDF2 pour dériver la clé AES
+    unsigned char derived_key[AES_KEY_SIZE];
+    if (derive_key_pbkdf2(key, AES_KEY_SIZE, salt, sizeof(salt), derived_key, AES_KEY_SIZE) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, derived_key, iv);
+    int len;
+    EVP_EncryptUpdate(ctx, ciphertext + 16, &len, plaintext, plaintext_len);
+    int ciphertext_len = len;
+
+    EVP_EncryptFinal_ex(ctx, ciphertext + 16 + len, &len);
+    ciphertext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    return ciphertext_len + 16;  // Ajouter 16 octets pour "Salted__" + sel
+}
+
+// Fonction pour chiffrer une clé AES avec RSA
+int encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, unsigned char *encrypted, size_t encrypted_len, const char *keys_path, const char *client_id) {
+    char full_public_key_path[512];
+    snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/%s_pub.pem", keys_path, client_id);
+    FILE *pubkey_file = fopen(full_public_key_path, "r");
+    if (!pubkey_file) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "| /!\\ Fichier de clé publique manquant\n");
+        } else {
+            perror("Erreur d'ouverture de la clé publique");
+        }
+        return -1;
+    }
+
+    EVP_PKEY *pubkey = PEM_read_PUBKEY(pubkey_file, NULL, NULL, NULL);
+    fclose(pubkey_file);
+
+    if (!pubkey) {
+        fprintf(stderr, "Erreur de lecture de la clé publique\n");
+        return -1;
+    }
+    
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(pubkey, NULL);
+    if (!ctx) {
+        fprintf(stderr, "Erreur de création du contexte de chiffrement\n");
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_encrypt_init(ctx) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation du chiffrement\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0) {
+        fprintf(stderr, "Erreur de configuration du padding RSA\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_encrypt(ctx, NULL, &encrypted_len, plaintext, plaintext_len) <= 0) {
+        fprintf(stderr, "Erreur lors de la détermination de la taille du contenu chiffré\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    if (EVP_PKEY_encrypt(ctx, encrypted, &encrypted_len, plaintext, plaintext_len) <= 0) {
+        fprintf(stderr, "Erreur lors du chiffrement du contenu\n");
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pubkey);
+    return 1;
+}
+
+// Fonction pour signer un fichier avec EVP_DigestSign
+int sign_content(const unsigned char *content, size_t content_len, 
+                 unsigned char *signature, size_t *sig_len, 
+                 const char *keys_path) {
+    char full_private_key_path[512];
+    snprintf(full_private_key_path, sizeof(full_private_key_path), "%sprivate/server_private.pem", keys_path);
+    
+    FILE *privkey_file = fopen(full_private_key_path, "r");
+    if (!privkey_file) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "| /!\\ Fichier de clé privée manquant\n");
+        } else {
+            perror("Erreur d'ouverture de la clé privée");
+        }
+        return -1;
+    }
+
+    EVP_PKEY *privkey = PEM_read_PrivateKey(privkey_file, NULL, NULL, NULL);
+    fclose(privkey_file);
+    
+    if (!privkey) {
+        fprintf(stderr, "Erreur de lecture de la clé privée\n");
+        return -1;
+    }
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "Erreur de création du contexte de signature\n");
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, privkey) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    if (EVP_DigestSignUpdate(mdctx, content, content_len) <= 0) {
+        fprintf(stderr, "Erreur de mise à jour de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    // Obtenir la taille de la signature
+    if (EVP_DigestSignFinal(mdctx, NULL, sig_len) <= 0) {
+        fprintf(stderr, "Erreur lors de l'obtention de la taille de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    // Générer la signature
+    if (EVP_DigestSignFinal(mdctx, signature, sig_len) <= 0) {
+        fprintf(stderr, "Erreur lors de la génération de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        EVP_PKEY_free(privkey);
+        return -1;
+    }
+
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(privkey);
+    return 0; // Succès
 }
 
 // Fonction pour vérifier une signature avec une clé publique
@@ -416,9 +558,47 @@ int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
     return 1;
 }
 
+// Fonction pour créer le payload chiffré à envoyer au client
+int encrypt_payload(const char *payload, size_t payload_len, const char *encrypted_payload, const char *keys_path, const char *client_id) {
+    // Génération de la clé AES et IV
+    unsigned char aes_key[AES_KEY_SIZE], aes_iv[AES_IV_SIZE];
+    generate_aes_key_iv(aes_key, aes_iv);
+
+    char encrypted_aes_key[512];
+    size_t encrypted_aes_key_len;
+    encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id);
+
+    // Chiffrement du JSON original avec AES-256-CBC + Salted__
+    unsigned char ciphertext[SERVER_BUFFER_SIZE];
+    int enc_len = encrypt_aes((unsigned char *)payload, payload_len, ciphertext, aes_key, aes_iv);
+    if (enc_len < 0) {
+        fprintf(stderr, "Erreur lors du chiffrement du payload\n");
+        return -1;
+    }
+
+    // Encodage en Base64 du payload et de l'IV
+    char encrypted_content_base64[SERVER_BUFFER_SIZE];
+    char aes_iv_base64[64];
+    char encrypted_aes_key_base64[1024];
+    
+    EVP_EncodeBlock((unsigned char *)encrypted_content_base64, ciphertext, enc_len);
+    EVP_EncodeBlock((unsigned char *)aes_iv_base64, aes_iv, AES_IV_SIZE);
+    EVP_EncodeBlock((unsigned char *)encrypted_aes_key_base64, encrypted_aes_key, encrypted_aes_key_len);
+
+    // Création du JSON final chiffré
+    cJSON *final_payload_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(final_payload_json, "aes_key", encrypted_aes_key_base64);
+    cJSON_AddStringToObject(final_payload_json, "aes_iv", aes_iv_base64);
+    cJSON_AddStringToObject(final_payload_json, "payload",encrypted_content_base64);
+    encrypted_payload = cJSON_Print(final_payload_json);
+
+    cJSON_Delete(final_payload_json);
+    return 1;
+}
+
 // Fonction pour gérer un client
 void handle_client(int client_socket, const char *keys_path, const char *transfer_dir) {
-    char buffer[CLIENT_DATA_BUFFER_SIZE];
+    char buffer[SERVER_BUFFER_SIZE];
     size_t bytes_received;
 
     struct sockaddr_in client_addr;
@@ -472,10 +652,10 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     unsigned char aes_iv[16];
     size_t aes_iv_len = base64_decode(aes_iv_base64, aes_iv);
 
-    unsigned char encrypted_payload[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char encrypted_payload[SERVER_BUFFER_SIZE];
     size_t encrypted_payload_len = base64_decode(payload_base64, encrypted_payload);
     
-    unsigned char decrypted_content[CLIENT_DATA_BUFFER_SIZE];
+    unsigned char decrypted_content[SERVER_BUFFER_SIZE];
     size_t decrypted_content_len = sizeof(decrypted_content);
 
     unsigned char decrypted_aes_key[256];
@@ -542,6 +722,8 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         unsigned char nonce[16];
         // Handle nonce request
         printf("| Requête de nonce\n");
+        const char *client_id = cJSON_GetObjectItem(decrypted_json, "client_id")->valuestring;
+
         // Generate a random nonce
         if (!RAND_bytes(nonce, sizeof(nonce))) {
             fprintf(stderr, "Erreur de génération du nonce\n");
@@ -560,8 +742,11 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         cJSON *response_json = cJSON_CreateObject();
         cJSON_AddStringToObject(response_json, "nonce", nonce_base64);
         const char *response = cJSON_Print(response_json);
-        send(client_socket, response, strlen(response), 0);
-        //TODO chiffrer la réponse
+
+        char encrypted_response[SERVER_BUFFER_SIZE];
+        encrypt_payload(response, strlen(response), encrypted_response, keys_path, client_id);
+
+        send(client_socket, encrypted_response, strlen(encrypted_response), 0);
         cJSON_Delete(response_json);
         cJSON_Delete(decrypted_json);
         close(client_socket);
@@ -811,7 +996,7 @@ int decode_rs(unsigned char* received, unsigned char* decoded) {
     return 0;
 }
 
-char decode(const char *fullpath_filename){
+void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer_size){
     // Décodage correcteur du fichier
     size_t file_size;
     unsigned char* encoded_data = read_file(fullpath_filename, &file_size);
@@ -820,16 +1005,14 @@ char decode(const char *fullpath_filename){
         return;
     }
     
-    char decoded_filepath[512];
     const char *filename = strrchr(fullpath_filename, '/');
     if (filename) {
         filename++; // Skip the '/'
     } else {
         filename = fullpath_filename; // No '/' found, use the whole string
     }
-    snprintf(decoded_filepath, sizeof(decoded_filepath), "Temp/decoded_%s", filename);
+    snprintf(decoded_filepath, buffer_size, "Temp/decoded_%s", filename);
     
-
     FILE *decoded_file = fopen(decoded_filepath, "wb");
     if (!decoded_file) {
         perror("Erreur ouverture fichier décodé");
@@ -847,7 +1030,7 @@ char decode(const char *fullpath_filename){
 
         unsigned char block_data_decode[BLOCK_SIZE] = {0};
         memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); // Copier tout sans le caractère de fin de chaîne
-        printf("Bloc %d: %s\n", i, block_data_decode);
+
         if (i == num_block_decode - 1) {
             // supprimer les octets de bourrage
             size_t last_block_size = strlen((char*)block_data_decode);
@@ -860,8 +1043,8 @@ char decode(const char *fullpath_filename){
     }
 
     fclose(decoded_file);
+    free(encoded_data);
     printf("Fichier décodé : %s\n", decoded_filepath);
-    return decoded_filepath;
 }
 
 int main() {
@@ -987,7 +1170,7 @@ int main() {
                 char full_path[512];
                 snprintf(full_path, sizeof(full_path), "%s/%s", config.transfer_dir, new_filename);
                 char decoded_filepath[512];
-                strcpy(decoded_filepath, decode(full_path));
+                decode(full_path, decoded_filepath, sizeof(decoded_filepath));
             }
         }
 
