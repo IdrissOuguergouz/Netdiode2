@@ -811,7 +811,7 @@ int decode_rs(unsigned char* received, unsigned char* decoded) {
     return 0;
 }
 
-void decode(const char *fullpath_filename){
+char decode(const char *fullpath_filename){
     // Décodage correcteur du fichier
     size_t file_size;
     unsigned char* encoded_data = read_file(fullpath_filename, &file_size);
@@ -820,7 +820,17 @@ void decode(const char *fullpath_filename){
         return;
     }
     
-    FILE *decoded_file = fopen("decoded_data", "wb");
+    char decoded_filepath[512];
+    const char *filename = strrchr(fullpath_filename, '/');
+    if (filename) {
+        filename++; // Skip the '/'
+    } else {
+        filename = fullpath_filename; // No '/' found, use the whole string
+    }
+    snprintf(decoded_filepath, sizeof(decoded_filepath), "Temp/decoded_%s", filename);
+    
+
+    FILE *decoded_file = fopen(decoded_filepath, "wb");
     if (!decoded_file) {
         perror("Erreur ouverture fichier décodé");
         return;
@@ -850,6 +860,8 @@ void decode(const char *fullpath_filename){
     }
 
     fclose(decoded_file);
+    printf("Fichier décodé : %s\n", decoded_filepath);
+    return decoded_filepath;
 }
 
 int main() {
@@ -912,6 +924,12 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    // Créer le dossier Temp avec les permissions 700
+    if (mkdir("Temp", S_IRWXU) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier Temp");
+        return EXIT_FAILURE;
+    }
+
     int server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket < 0) {
         perror("Erreur de création du socket");
@@ -968,7 +986,8 @@ int main() {
                 // Path complet du fichier
                 char full_path[512];
                 snprintf(full_path, sizeof(full_path), "%s/%s", config.transfer_dir, new_filename);
-                decode(full_path);
+                char decoded_filepath[512];
+                strcpy(decoded_filepath, decode(full_path));
             }
         }
 
