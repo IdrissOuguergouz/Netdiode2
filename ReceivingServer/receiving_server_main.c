@@ -559,7 +559,7 @@ int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
 }
 
 // Fonction pour créer le payload chiffré à envoyer au client
-int encrypt_payload(const char *payload, size_t payload_len, const char *encrypted_payload, const char *keys_path, const char *client_id) {
+int encrypt_payload(const char *payload, size_t payload_len, char *encrypted_payload, size_t encrypted_payload_len, const char *keys_path, const char *client_id) {
     // Génération de la clé AES et IV
     unsigned char aes_key[AES_KEY_SIZE], aes_iv[AES_IV_SIZE];
     generate_aes_key_iv(aes_key, aes_iv);
@@ -595,8 +595,24 @@ int encrypt_payload(const char *payload, size_t payload_len, const char *encrypt
     cJSON_AddStringToObject(final_payload_json, "aes_key", encrypted_aes_key_base64);
     cJSON_AddStringToObject(final_payload_json, "aes_iv", aes_iv_base64);
     cJSON_AddStringToObject(final_payload_json, "payload",encrypted_content_base64);
-    encrypted_payload = cJSON_Print(final_payload_json);
+    
+    // Sérialisation du JSON dans le buffer passé par l'appelant
+    char *json_str = cJSON_PrintUnformatted(final_payload_json);
+    if (!json_str) {
+        fprintf(stderr, "Erreur lors de la sérialisation du JSON\n");
+        cJSON_Delete(final_payload_json);
+        return -1;
+    }
 
+    if (strlen(json_str) >= encrypted_payload_len) {
+        fprintf(stderr, "Erreur : buffer insuffisant pour stocker le JSON chiffré\n");
+        free(json_str);
+        cJSON_Delete(final_payload_json);
+        return -1;
+    }
+
+    strcpy(encrypted_payload, json_str);
+    free(json_str);
     cJSON_Delete(final_payload_json);
     return 1;
 }
@@ -746,12 +762,18 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         // Send the nonce to the client
         cJSON *response_json = cJSON_CreateObject();
         cJSON_AddStringToObject(response_json, "nonce", nonce_base64);
-        const char *response = cJSON_Print(response_json);
+        const char *response = cJSON_PrintUnformatted(response_json);
         printf("response: %s\n", response);
+
         char encrypted_response[SERVER_BUFFER_SIZE];
-        encrypt_payload(response, strlen(response), encrypted_response, keys_path, client_id);
-        printf("encrypted_response: %s\n", encrypted_response);
-        send(client_socket, encrypted_response, strlen(encrypted_response), 0);
+        if (encrypt_payload(response, strlen(response), encrypted_response, sizeof(encrypted_response), keys_path, client_id) == 1) {
+            printf("encrypted_response: %s\n", encrypted_response);
+            send(client_socket, encrypted_response, strlen(encrypted_response), 0);
+        } else {
+            fprintf(stderr, "| Erreur lors du chiffrement de la réponse\n");
+            const char *response = "Erreur lors du chiffrement de la réponse\n";
+            send(client_socket, response, strlen(response), 0);
+        }
         cJSON_Delete(response_json);
         cJSON_Delete(decrypted_json);
         close(client_socket);
