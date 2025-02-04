@@ -250,9 +250,10 @@ int encrypt_aes(const unsigned char *plaintext, size_t plaintext_len,
 }
 
 // Fonction pour chiffrer une clé AES avec RSA
-int encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, unsigned char *encrypted, size_t encrypted_len, const char *keys_path, const char *client_id) {
+int encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, unsigned char *encrypted, size_t *encrypted_len, const char *keys_path, const char *client_id) {
     char full_public_key_path[512];
     snprintf(full_public_key_path, sizeof(full_public_key_path), "%spublic/clients/%s_pub.pem", keys_path, client_id);
+    
     FILE *pubkey_file = fopen(full_public_key_path, "r");
     if (!pubkey_file) {
         if (errno == ENOENT) {
@@ -265,7 +266,7 @@ int encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, unsigned c
 
     EVP_PKEY *pubkey = PEM_read_PUBKEY(pubkey_file, NULL, NULL, NULL);
     fclose(pubkey_file);
-
+    
     if (!pubkey) {
         fprintf(stderr, "Erreur de lecture de la clé publique\n");
         return -1;
@@ -292,19 +293,31 @@ int encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, unsigned c
         return -1;
     }
 
-    if (EVP_PKEY_encrypt(ctx, NULL, &encrypted_len, plaintext, plaintext_len) <= 0) {
+    // Déterminer la taille nécessaire pour le buffer
+    size_t outlen = 0;
+    if (EVP_PKEY_encrypt(ctx, NULL, &outlen, plaintext, plaintext_len) <= 0) {
         fprintf(stderr, "Erreur lors de la détermination de la taille du contenu chiffré\n");
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pubkey);
         return -1;
     }
 
-    if (EVP_PKEY_encrypt(ctx, encrypted, &encrypted_len, plaintext, plaintext_len) <= 0) {
+    if (outlen > *encrypted_len) {
+        fprintf(stderr, "Erreur : buffer de sortie trop petit (%zu requis, %zu fourni)\n", outlen, *encrypted_len);
+        EVP_PKEY_CTX_free(ctx);
+        EVP_PKEY_free(pubkey);
+        return -1;
+    }
+
+    // Chiffrement réel
+    if (EVP_PKEY_encrypt(ctx, encrypted, &outlen, plaintext, plaintext_len) <= 0) {
         fprintf(stderr, "Erreur lors du chiffrement du contenu\n");
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pubkey);
         return -1;
     }
+
+    *encrypted_len = outlen;  // Mettre à jour la taille du résultat
 
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pubkey);
@@ -570,8 +583,8 @@ int encrypt_payload(const char *payload, size_t payload_len, char *encrypted_pay
     }
     printf("\n");
     char encrypted_aes_key[512];
-    size_t encrypted_aes_key_len;
-    if (encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id) != 1) {
+    size_t encrypted_aes_key_len = sizeof(encrypted_aes_key);
+    if (encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, &encrypted_aes_key_len, keys_path, client_id) != 1) {
         fprintf(stderr, "Erreur lors du chiffrement de la clé AES avec RSA\n");
         return -1;
     }
