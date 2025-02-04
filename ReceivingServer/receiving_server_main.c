@@ -566,7 +566,10 @@ int encrypt_payload(const char *payload, size_t payload_len, const char *encrypt
 
     char encrypted_aes_key[512];
     size_t encrypted_aes_key_len;
-    encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id);
+    if (encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id) != 1) {
+        fprintf(stderr, "Erreur lors du chiffrement de la clé AES avec RSA\n");
+        return -1;
+    }
 
     // Chiffrement du JSON original avec AES-256-CBC + Salted__
     unsigned char ciphertext[SERVER_BUFFER_SIZE];
@@ -575,6 +578,8 @@ int encrypt_payload(const char *payload, size_t payload_len, const char *encrypt
         fprintf(stderr, "Erreur lors du chiffrement du payload\n");
         return -1;
     }
+
+    printf("Chiffrements fonctionnels\n");
 
     // Encodage en Base64 du payload et de l'IV
     char encrypted_content_base64[SERVER_BUFFER_SIZE];
@@ -742,10 +747,10 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         cJSON *response_json = cJSON_CreateObject();
         cJSON_AddStringToObject(response_json, "nonce", nonce_base64);
         const char *response = cJSON_Print(response_json);
-
+        printf("response: %s\n", response);
         char encrypted_response[SERVER_BUFFER_SIZE];
         encrypt_payload(response, strlen(response), encrypted_response, keys_path, client_id);
-
+        printf("encrypted_response: %s\n", encrypted_response);
         send(client_socket, encrypted_response, strlen(encrypted_response), 0);
         cJSON_Delete(response_json);
         cJSON_Delete(decrypted_json);
