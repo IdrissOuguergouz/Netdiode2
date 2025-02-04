@@ -674,22 +674,18 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     // code correcteur d'erreur (char)
-    printf("data de ce qui est envoyé avant l'encodage : %s\n", content_data);
     unsigned char data_correction[CLIENT_DATA_BUFFER_SIZE];
     memcpy(data_correction, content_data, content_data_len);
     size_t data_size = sizeof(data_correction);
     size_t num_block = ((data_size - 1) / BLOCK_SIZE) + 1;
-    printf("après modif mémoire : %s\n", data_correction);
     time_t now = time(NULL);
     char correct_path[256];
-    printf("transfer_dir: %s\n", transfer_dir);
     struct stat st = {0};
     if (stat(transfer_dir, &st) == -1) {
         printf("le dossier n'existe pas\n");
     }
 
-    snprintf(correct_path, sizeof(correct_path), "%s/transfer_%ld", transfer_dir, now);
-    printf("correct_path: %s\n", correct_path);
+    snprintf(correct_path, sizeof(correct_path), "%stransfer_%ld", transfer_dir, now);
     
     FILE *encoded_file = fopen(correct_path, "wb");
     if (!encoded_file) {
@@ -698,8 +694,6 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         close(client_socket);
         return;
     }
-
-    printf("up\n");
 
     for (int i = 0; i < num_block; i++) {
         unsigned char encoded_block_data[ENCODED_SIZE];
@@ -715,7 +709,6 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     fclose(encoded_file);
-
     cJSON_Delete(json);
 
     // Étape 5 : Réponse au client
