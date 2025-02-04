@@ -4,6 +4,7 @@
 #include <time.h>
 #include <errno.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
 #include <cjson/cJSON.h>
@@ -515,8 +516,8 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         }
     }
 
-    cJSON *json = cJSON_Parse(decrypted_content);
-    if (!json) {
+    cJSON *decrypted_json = cJSON_Parse(decrypted_content);
+    if (!decrypted_json) {
         fprintf(stderr, "| Erreur de parsing des données\n");
         const char *response = "Données au format invalide !\n";
         send(client_socket, response, strlen(response), 0);
@@ -527,12 +528,12 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
 
     // Vérifier le but de la requête
-    cJSON *request_type = cJSON_GetObjectItem(received_json, "request");
+    cJSON *request_type = cJSON_GetObjectItem(decrypted_json, "request");
     if (!request_type || !cJSON_IsString(request_type)) {
         fprintf(stderr, "| Champ 'request' manquant ou invalide\n");
         const char *response = "Champ 'request' manquant ou invalide\n";
         send(client_socket, response, strlen(response), 0);
-        cJSON_Delete(received_json);
+        cJSON_Delete(decrypted_json);
         close(client_socket);
         return;
     }
@@ -546,8 +547,8 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
             fprintf(stderr, "Erreur de génération du nonce\n");
             const char *response = "Erreur de génération du nonce\n";
             send(client_socket, response, strlen(response), 0);
-            cJSON_Delete(received_json);
             close(client_socket);
+            cJSON_Delete(decrypted_json);
             return;
         }
 
@@ -562,22 +563,21 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         send(client_socket, response, strlen(response), 0);
 
         cJSON_Delete(response_json);
-        cJSON_Delete(received_json);
+        cJSON_Delete(decrypted_json);
         close(client_socket);
         return;
     } else if (strcmp(request_type->valuestring, "file") != 0) {
         fprintf(stderr, "| Type de requête inconnu\n");
         const char *response = "Type de requête inconnu\n";
         send(client_socket, response, strlen(response), 0);
-        cJSON_Delete(received_json);
         close(client_socket);
         return;
     }
 
     // Extraire les données encodées du fichier
-    const char *client_nonce_base64 = cJSON_GetObjectItem(json, "nonce")->valuestring;
-    const char *signature_base64 = cJSON_GetObjectItem(json, "signature")->valuestring;
-    const char *client_id = cJSON_GetObjectItem(json, "client_id")->valuestring;
+    const char *client_nonce_base64 = cJSON_GetObjectItem(decrypted_json, "nonce")->valuestring;
+    const char *signature_base64 = cJSON_GetObjectItem(decrypted_json, "signature")->valuestring;
+    const char *client_id = cJSON_GetObjectItem(decrypted_json, "client_id")->valuestring;
 
     // Décodage de base64 des données fichier et de la signature
     unsigned char client_nonce[16];
@@ -595,17 +595,18 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         fprintf(stderr, "| Échec de l'authentification du client (Signature invalide)\n");
         const char *response = "Échec de l'authentification du client (Signature invalide)\n";
         send(client_socket, response, strlen(response), 0);
-        cJSON_Delete(json);
+        cJSON_Delete(decrypted_json);
         close(client_socket);
         return;
     } else {
         fprintf(stderr, "| Erreur lors de l'authentification du client\n");
         const char *response = "Erreur lors de l'authentification du client\n";
         send(client_socket, response, strlen(response), 0);
-        cJSON_Delete(json);
+        cJSON_Delete(decrypted_json);
         close(client_socket);
         return;
     }
+    cJSON_Delete(decrypted_json);
 
     //TODO Envoyer les fichiers au client
 
