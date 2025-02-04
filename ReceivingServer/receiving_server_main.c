@@ -849,21 +849,6 @@ int main() {
         printf("Erreur lors du chargement de l'ACL\n");
     }
 
-    // Vérifier et créer le dossier transfer_dir si nécessaire
-    struct stat transfer_dir_stat;
-    if (stat(config.transfer_dir, &transfer_dir_stat) != 0) {
-        // Le dossier n'existe pas, on le crée
-        if (mkdir(config.transfer_dir, S_IRWXU | S_IRWXG | S_IROTH) != 0) {
-            perror("Erreur lors de la création du dossier transfer_dir");
-            return EXIT_FAILURE;
-        }
-        printf("Dossier de transfert créé : %s\n", config.transfer_dir);
-    } else if (!S_ISDIR(transfer_dir_stat.st_mode)) {
-        // Si un fichier avec le même nom existe, erreur
-        fprintf(stderr, "Erreur : %s existe mais n'est pas un dossier\n", config.transfer_dir);
-        return EXIT_FAILURE;
-    }
-
     // Vérifier et créer le dossier keys_path et son arborescence si nécessaire
     struct stat keys_dir_stat;
     if (stat(config.keys_path, &keys_dir_stat) != 0) {
@@ -935,42 +920,42 @@ int main() {
     }
 
     while (1) {
-    char new_filename[NAME_MAX + 1] = {0};
+        char new_filename[NAME_MAX + 1] = {0};
 
-    // Initialiser fd_set pour select
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(inotify_fd, &readfds);
-    FD_SET(server_socket, &readfds);
+        // Initialiser fd_set pour select
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(inotify_fd, &readfds);
+        FD_SET(server_socket, &readfds);
 
-    // Attente de l'événement (inotify ou connexion client)
-    struct timeval timeout = {0, 100000};  // Timeout de 100 ms (réglable)
-    int ready_fds = select(FD_SETSIZE, &readfds, NULL, NULL, &timeout);
+        // Attente de l'événement (inotify ou connexion client)
+        struct timeval timeout = {0, 100000};  // Timeout de 100 ms (réglable)
+        int ready_fds = select(FD_SETSIZE, &readfds, NULL, NULL, &timeout);
 
-    if (ready_fds < 0) {
-        perror("Erreur select");
-        return EXIT_FAILURE;
-    }
+        if (ready_fds < 0) {
+            perror("Erreur select");
+            return EXIT_FAILURE;
+        }
 
-    // Vérifier si un événement inotify est prêt
-    if (FD_ISSET(inotify_fd, &readfds)) {
-        if (check_new_files(inotify_fd, new_filename, sizeof(new_filename))) {
-            printf("Nouveau fichier créé : %s\n", new_filename);
-            // Path complet du fichier
-            char full_path[512];
-            snprintf(full_path, sizeof(full_path), "%s/%s", config.transfer_dir, new_filename);
-            decode(full_path);
+        // Vérifier si un événement inotify est prêt
+        if (FD_ISSET(inotify_fd, &readfds)) {
+            if (check_new_files(inotify_fd, new_filename, sizeof(new_filename))) {
+                printf("Nouveau fichier créé : %s\n", new_filename);
+                // Path complet du fichier
+                char full_path[512];
+                snprintf(full_path, sizeof(full_path), "%s/%s", config.transfer_dir, new_filename);
+                decode(full_path);
+            }
+        }
+
+        // Vérifier si une connexion client est prête
+        if (FD_ISSET(server_socket, &readfds)) {
+            int client_socket = accept(server_socket, NULL, NULL);
+            if (client_socket >= 0) {
+                handle_client(client_socket, config.keys_path, config.transfer_dir);
+            }
         }
     }
-
-    // Vérifier si une connexion client est prête
-    if (FD_ISSET(server_socket, &readfds)) {
-        int client_socket = accept(server_socket, NULL, NULL);
-        if (client_socket >= 0) {
-            handle_client(client_socket, config.keys_path, config.transfer_dir);
-        }
-    }
-}
 
     close(server_socket);
     return 0;

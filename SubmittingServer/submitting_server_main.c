@@ -203,6 +203,70 @@ int derive_key_pbkdf2(const unsigned char *password, size_t password_len,
     return 1;
 }
 
+// Fonction pour signer un contenu avec une clé privée
+int sign_content(const unsigned char *content, size_t content_len, unsigned char **signature, size_t *signature_len, const char *keys_path) {
+    char full_private_key_path[512];
+    snprintf(full_private_key_path, sizeof(full_private_key_path), "%sprivate/server_private.pem", keys_path);
+    FILE *privkey_file = fopen(full_private_key_path, "r");
+    if (!privkey_file) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "| /!\\ Fichier de clé privée manquant\n");
+        } else {
+            perror("Erreur d'ouverture de la clé privée");
+        }
+        return -1;
+    }
+
+    EVP_PKEY *privkey = PEM_read_PrivateKey(privkey_file, NULL, NULL, NULL);
+    fclose(privkey_file);
+
+    if (!privkey) {
+        fprintf(stderr, "Erreur de lecture de la clé privée\n");
+        return -1;
+    }
+    
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "Erreur de création du contexte de signature\n");
+        return -1;
+    }
+
+    if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, privkey) <= 0) {
+        fprintf(stderr, "Erreur d'initialisation de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    if (EVP_DigestSignUpdate(mdctx, content, content_len) <= 0) {
+        fprintf(stderr, "Erreur de mise à jour de la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    if (EVP_DigestSignFinal(mdctx, NULL, signature_len) <= 0) {
+        fprintf(stderr, "Erreur de finalisation de la signature (taille)\n");
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    *signature = (unsigned char *)malloc(*signature_len);
+    if (!*signature) {
+        fprintf(stderr, "Erreur d'allocation de mémoire pour la signature\n");
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    if (EVP_DigestSignFinal(mdctx, *signature, signature_len) <= 0) {
+        fprintf(stderr, "Erreur de finalisation de la signature\n");
+        free(*signature);
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+
+    EVP_MD_CTX_free(mdctx);
+    return 1;
+}
+
 // Fonction pour vérifier une signature avec une clé publique
 int verify_signature(const unsigned char *content, size_t content_len,
                      const unsigned char *signature, size_t signature_len, 
@@ -673,7 +737,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         return;
     }
 
-    // code correcteur d'erreur (char)
+    // Etape 4 : Encodage des données pour la correction d'erreurs
     unsigned char data_correction[CLIENT_DATA_BUFFER_SIZE];
     memcpy(data_correction, content_data, content_data_len);
     size_t data_size = sizeof(data_correction);
