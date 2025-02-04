@@ -383,62 +383,6 @@ int decrypt_rsa(const unsigned char *encrypted_content, size_t encrypted_len,
     return 1;
 }
 
-// Fonction pour encapsuler un fichier
-void encapsulate_file(const char *original_file, const char *recipient, const char *output_file) {
-    FILE *input = fopen(original_file, "rb");
-    if (!input) {
-        perror("Erreur d'ouverture du fichier original");
-        exit(EXIT_FAILURE);
-    }
-
-    FILE *output = fopen(output_file, "wb");
-    if (!output) {
-        perror("Erreur de création du fichier encapsulé");
-        fclose(input);
-        exit(EXIT_FAILURE);
-    }
-
-    // Calcul du hash
-    uint8_t hash[32];
-    compute_hash(original_file, hash);
-
-    // Création de l'en-tête
-    EncapsulationHeader header = {
-        .magic = MAGIC_NUMBER,
-        .version = 1,
-        .timestamp = time(NULL),
-        .original_size = 0
-    };
-    strncpy(header.recipient, recipient, MAX_DEST_SIZE - 1);
-    strncpy(header.hash_algo, "SHA-256", sizeof(header.hash_algo));
-    memcpy(header.hash, hash, sizeof(hash));
-
-    // Calcul de la taille du fichier original
-    fseek(input, 0, SEEK_END);
-    header.original_size = ftell(input);
-    header.total_size = sizeof(header) + header.original_size;
-    fseek(input, 0, SEEK_SET);
-
-    // Génération de données de correction d'erreurs (simple exemple)
-    memset(header.ecc, 0xFF, sizeof(header.ecc)); // À remplacer par un algorithme ECC réel
-
-    // Écriture de l'en-tête
-    fwrite(&header, sizeof(header), 1, output);
-
-    // Écriture des données du fichier original
-    uint8_t buffer[1024];
-    size_t bytesRead;
-    while ((bytesRead = fread(buffer, 1, sizeof(buffer), input)) > 0) {
-        fwrite(buffer, 1, bytesRead, output);
-    }
-
-    fclose(input);
-    fclose(output);
-
-    printf("Fichier encapsulé créé : %s\n", output_file);
-    return 1;
-}
-
 unsigned char* read_file(const char *filename, size_t *filesize) {
     printf("Filename: %s\n", filename);
     FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
@@ -738,7 +682,14 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
 
     time_t now = time(NULL);
     char correct_path[256];
+    printf("transfer_dir: %s\n", transfer_dir);
+    struct stat st = {0};
+    if (stat(transfer_dir, &st) == -1) {
+        printf("le dossier n'existe pas\n");
+    }
+
     snprintf(correct_path, sizeof(correct_path), "%s/transfer_%ld", transfer_dir, now);
+    printf("correct_path: %s\n", correct_path);
     
     FILE *encoded_file = fopen(correct_path, "wb");
     if (!encoded_file) {
