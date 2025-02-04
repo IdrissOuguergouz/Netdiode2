@@ -436,9 +436,11 @@ void encapsulate_file(const char *original_file, const char *recipient, const ch
     fclose(output);
 
     printf("Fichier encapsulé créé : %s\n", output_file);
+    return 1;
 }
 
 unsigned char* read_file(const char *filename, size_t *filesize) {
+    printf("Filename: %s\n", filename);
     FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
     if (!file) {
         perror("Erreur d'ouverture");
@@ -474,6 +476,7 @@ unsigned char* read_file(const char *filename, size_t *filesize) {
 
     return content;
 }
+
 // Fonction pour encoder les données avec Reed-Solomon
 void encode_rs(unsigned char* data, size_t size, unsigned char* encoded) {
     correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
@@ -493,6 +496,7 @@ void encode_rs(unsigned char* data, size_t size, unsigned char* encoded) {
     }
 
     correct_reed_solomon_destroy(rs);
+    return;
 }
 
 void introduce_errors(unsigned char* data, int num_errors) {
@@ -501,6 +505,7 @@ void introduce_errors(unsigned char* data, int num_errors) {
         int pos = rand() % ENCODED_SIZE;
         data[pos] ^= (1 << (rand() % 8));
     }
+    return;
 }
 
 // Fonction pour gérer un client
