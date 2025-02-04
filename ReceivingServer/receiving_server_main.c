@@ -561,7 +561,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         cJSON_AddStringToObject(response_json, "nonce", nonce_base64);
         const char *response = cJSON_Print(response_json);
         send(client_socket, response, strlen(response), 0);
-
+        //TODO chiffrer la réponse
         cJSON_Delete(response_json);
         cJSON_Delete(decrypted_json);
         close(client_socket);
@@ -608,10 +608,33 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     }
     cJSON_Delete(decrypted_json);
 
-    //TODO Envoyer les fichiers au client
+    // Étape 4 : Envoyer les fichiers au client
+    DIR *dir = opendir(transfer_dir);
+    if (!dir) {
+        perror("Erreur d'ouverture du dossier de transfert");
+        const char *response = "Erreur d'ouverture du dossier de transfert\n";
+        send(client_socket, response, strlen(response), 0);
+        cJSON_Delete(decrypted_json);
+        close(client_socket);
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        struct stat file_stat;
+        char file_path[512];
+        snprintf(file_path, sizeof(file_path), "%s/%s", transfer_dir, entry->d_name);
+        if (stat(file_path, &file_stat) == 0 && S_ISREG(file_stat.st_mode)) { // Vérifier si c'est un fichier régulier
+            char file_path[512];
+            snprintf(file_path, sizeof(file_path), "%s/%s", transfer_dir, entry->d_name);
+            send_file(client_socket, file_path);
+        }
+    }
+
+    closedir(dir);
 
     // Étape 5 : Réponse au client
-    const char *response = "Données reçues avec succès !\n";
+    const char *response = "Demande reçue avec succès !\n";
     send(client_socket, response, strlen(response), 0);
     close(client_socket);
 }
