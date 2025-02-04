@@ -103,7 +103,7 @@ EVP_PKEY *load_private_key() {
 }
 
 // Sign Nonce
-char *sign_nonce(const char *nonce) {
+char *sign_nonce(const char *nonce, size_t nonce_len) {
     printf("[LOG] Signing nonce: %s\n", nonce);
 
     EVP_PKEY *private_key = load_private_key();
@@ -115,7 +115,7 @@ char *sign_nonce(const char *nonce) {
     EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
     EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, private_key);
 
-    EVP_DigestSignUpdate(mdctx, nonce, strlen(nonce));
+    EVP_DigestSignUpdate(mdctx, nonce, nonce_len);
 
     size_t sig_len = 0;
     EVP_DigestSignFinal(mdctx, NULL, &sig_len);
@@ -125,7 +125,6 @@ char *sign_nonce(const char *nonce) {
     EVP_PKEY_free(private_key);
 
     char *signature_base64 = base64_encode(signature, sig_len);
-    printf("[LOG] Nonce signature (Base64): %s\n", signature_base64);
 
     free(signature);
     return signature_base64;
@@ -156,23 +155,53 @@ void refresh_file_list(GtkWidget *widget, gpointer data) {
     }
     closedir(dir);
 }
+// Fonction pour dériver une clé avec PBKDF2-HMAC-SHA256
+int derive_key_pbkdf2(const unsigned char *password, size_t password_len,
+                      const unsigned char *salt, size_t salt_len,
+                      unsigned char *key, size_t key_len) {
+    int iterations = 10000;  // Ajustable selon le niveau de sécurité souhaité
+
+    if (PKCS5_PBKDF2_HMAC((const char *)password, password_len, 
+                          salt, salt_len, iterations, EVP_sha256(), 
+                          key_len, key) != 1) {
+        fprintf(stderr, "Erreur de dérivation de la clé avec PBKDF2\n");
+        return -1;
+    }
+    return 1;
+}
+// Fonction pour chiffrer avec AES-256-CBC et ajouter l'en-tête "Salted__"
 int encrypt_aes(const unsigned char *plaintext, size_t plaintext_len,
                 unsigned char *ciphertext, unsigned char *key, unsigned char *iv) {
     
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return -1;
 
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
+    // Générer un sel aléatoire de 8 octets
+    unsigned char salt[8];
+    RAND_bytes(salt, sizeof(salt));
 
+    // Ajouter l'en-tête "Salted__" suivi du sel
+    memcpy(ciphertext, "Salted__", 8);
+    memcpy(ciphertext + 8, salt, 8);
+
+    // Initialiser le chiffrement avec PBKDF2 pour dériver la clé AES
+    unsigned char derived_key[AES_KEY_SIZE];
+    if (derive_key_pbkdf2(key, AES_KEY_SIZE, salt, sizeof(salt), derived_key, AES_KEY_SIZE) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -1;
+    }
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, derived_key, iv);
     int len;
-    EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len);
+    EVP_EncryptUpdate(ctx, ciphertext + 16, &len, plaintext, plaintext_len);
     int ciphertext_len = len;
 
-    EVP_EncryptFinal_ex(ctx, ciphertext + len, &len);
+    EVP_EncryptFinal_ex(ctx, ciphertext + 16 + len, &len);
     ciphertext_len += len;
 
     EVP_CIPHER_CTX_free(ctx);
-    return ciphertext_len;
+
+    return ciphertext_len + 16;  // Ajouter 16 octets pour "Salted__" + sel
 }
 char *encrypt_rsa(const unsigned char *plaintext, size_t plaintext_len, EVP_PKEY *public_key) {
     EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(public_key, NULL);
@@ -198,6 +227,19 @@ EVP_PKEY *load_public_key(const char *public_key_path) {
     EVP_PKEY *public_key = PEM_read_PUBKEY(key_file, NULL, NULL, NULL);
     fclose(key_file);
     return public_key;
+}
+size_t base64_decode(const char *input, unsigned char *output) {
+    BIO *b64 = BIO_new(BIO_f_base64());
+    BIO *bio = BIO_new_mem_buf(input, -1);
+    bio = BIO_push(b64, bio);
+
+    // Désactiver le saut de ligne dans le Base64
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+    const size_t input_len = strlen(input);
+    const size_t output_len = BIO_read(bio, output, input_len);
+    BIO_free_all(bio);
+    return output_len;
 }
 void authenticate_with_server(GtkWidget *widget, gpointer data) {
     const char *server_ip = gtk_entry_get_text(GTK_ENTRY(entry_ip));
@@ -226,10 +268,74 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
         return;
     }
 
-    // Step 1: Request nonce
-    char request_nonce[] = "{\"request\": \"nonce\"}";
+	// Step 1: Request nonce
+	cJSON *request_nonce_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(request_nonce_json, "request", "nonce");
+	
+	char *request_nonce = cJSON_Print(request_nonce_json);
+    cJSON_Delete(request_nonce_json);
     printf("[LOG] Sending JSON: %s\n", request_nonce);
-    send(sock, request_nonce, strlen(request_nonce), 0);
+
+    // Load the server's public key for encryption
+    EVP_PKEY *nonce_server_pub_key = load_public_key("server_pubkey.pem");
+    if (!nonce_server_pub_key) {
+        printf("[ERROR] Failed to load server public key!\n");
+        free(request_nonce);
+        close(sock);
+        return;
+    }
+
+    // Generate AES key & IV
+    unsigned char nonce_aes_key[AES_KEY_SIZE];
+    unsigned char nonce_iv[16];
+    RAND_bytes(nonce_aes_key, sizeof(nonce_aes_key));
+    RAND_bytes(nonce_iv, sizeof(nonce_iv));
+
+    printf("[LOG] Generated AES Key and IV\n");
+
+    // Encrypt the authentication JSON using AES
+    unsigned char encrypted_nonce_payload[2048];
+    int encrypted_nonce_payload_len = encrypt_aes((unsigned char *)request_nonce, strlen(request_nonce), encrypted_nonce_payload, nonce_aes_key, nonce_iv);
+    free(request_nonce);
+    
+    if (encrypted_nonce_payload_len < 0) {
+        printf("[ERROR] AES encryption failed!\n");
+        EVP_PKEY_free(nonce_server_pub_key);
+        close(sock);
+        return;
+    }
+
+    // Encrypt the AES key using RSA
+    char *encrypted_nonce_aes_key_base64 = encrypt_rsa(nonce_aes_key, AES_KEY_SIZE, nonce_server_pub_key);
+    EVP_PKEY_free(nonce_server_pub_key);
+    if (!encrypted_nonce_aes_key_base64) {
+        printf("[ERROR] RSA encryption failed!\n");
+        close(sock);
+        return;
+    }
+
+    printf("[LOG] AES Key encrypted with RSA: %s\n", encrypted_nonce_aes_key_base64);
+
+    // Convert encrypted payload & IV to Base64
+    char encrypted_nonce_payload_base64[4096];
+    EVP_EncodeBlock((unsigned char *)encrypted_nonce_payload_base64, encrypted_nonce_payload, encrypted_nonce_payload_len);
+
+    char nonce_iv_base64[64];
+    EVP_EncodeBlock((unsigned char *)nonce_iv_base64, nonce_iv, sizeof(nonce_iv));
+
+    // Construct final encrypted authentication JSON
+    cJSON *final_request_nonce_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(final_request_nonce_json, "aes_key", encrypted_nonce_aes_key_base64);
+    cJSON_AddStringToObject(final_request_nonce_json, "aes_iv", nonce_iv_base64);
+    cJSON_AddStringToObject(final_request_nonce_json, "payload", encrypted_nonce_payload_base64);
+    
+    char *final_request_nonce = cJSON_Print(final_request_nonce_json);
+    cJSON_Delete(final_request_nonce_json);
+    free(encrypted_nonce_aes_key_base64);
+
+    printf("[LOG] Sending encrypted authentication JSON:\n%s\n", final_request_nonce);
+    send(sock, final_request_nonce, strlen(final_request_nonce), 0);
+    free(final_request_nonce);
 
     // Step 2: Receive nonce
     char buffer[1024] = {0};
@@ -258,43 +364,45 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
         return;
     }
 
-    char nonce[256];
+    char nonce[64];
     strncpy(nonce, nonce_item->valuestring, sizeof(nonce) - 1);
     nonce[sizeof(nonce) - 1] = '\0'; // Ensure null termination
 
     printf("[LOG] Nonce received: %s\n", nonce);
     cJSON_Delete(json);
+	close(sock);
 
     // Step 3: Sign the nonce using private key
-    EVP_PKEY *client_private_key = load_private_key("private_key.pem");
-    if (!client_private_key) {
-        printf("[ERROR] Failed to load private key!\n");
-        close(sock);
-        return;
-    }
-
-	// Get Base64-encoded signature directly from sign_nonce()
-	char *signature_base64 = sign_nonce(nonce);
+	char decoded_nonce[16];
+	size_t decoded_nonce_len = base64_decode(nonce, decoded_nonce);
+	char *signature_base64 = sign_nonce(decoded_nonce, decoded_nonce_len);
 
 	if (!signature_base64) {
 		printf("[ERROR] Signing nonce failed!\n");
-		close(sock);
 		return;
 	}
 
 	printf("[LOG] Nonce Signature (Base64): %s\n", signature_base64);
 
-    // Step 4: Convert signature to Base64
-    char signature_base64[1024];
-    EVP_EncodeBlock((unsigned char *)signature_base64, signature, sig_len);
+	// Step 4: Reopen auth_socket Connection
+    int auth_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (auth_sock < 0) {
+        perror("[ERROR] auth_socket creation failed");
+        return;
+    }
 
-    printf("[LOG] Nonce Signature (Base64): %s\n", signature_base64);
+    if (connect(auth_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("[ERROR] Connection failed");
+        close(auth_sock);
+        return;
+    }
 
     // Step 5: Create authentication JSON
     cJSON *auth_json = cJSON_CreateObject();
+	cJSON_AddStringToObject(auth_json, "request", "file");
     cJSON_AddStringToObject(auth_json, "nonce", nonce);
     cJSON_AddStringToObject(auth_json, "signature", signature_base64);
-    cJSON_AddStringToObject(auth_json, "client_id", "client123");
+    cJSON_AddStringToObject(auth_json, "client_id", CLIENT_ID);
 
     char *auth_json_string = cJSON_Print(auth_json);
     cJSON_Delete(auth_json);
@@ -306,7 +414,7 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
     if (!server_pub_key) {
         printf("[ERROR] Failed to load server public key!\n");
         free(auth_json_string);
-        close(sock);
+        close(auth_sock);
         return;
     }
 
@@ -326,7 +434,7 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
     if (encrypted_payload_len < 0) {
         printf("[ERROR] AES encryption failed!\n");
         EVP_PKEY_free(server_pub_key);
-        close(sock);
+        close(auth_sock);
         return;
     }
 
@@ -335,7 +443,7 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
     EVP_PKEY_free(server_pub_key);
     if (!encrypted_aes_key_base64) {
         printf("[ERROR] RSA encryption failed!\n");
-        close(sock);
+        close(auth_sock);
         return;
     }
 
@@ -359,15 +467,15 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
     free(encrypted_aes_key_base64);
 
     printf("[LOG] Sending encrypted authentication JSON:\n%s\n", final_auth_json_string);
-    send(sock, final_auth_json_string, strlen(final_auth_json_string), 0);
+    send(auth_sock, final_auth_json_string, strlen(final_auth_json_string), 0);
     free(final_auth_json_string);
 
     // Step 12: Receive authentication response
     memset(buffer, 0, sizeof(buffer));
-    bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    bytes_received = recv(auth_sock, buffer, sizeof(buffer) - 1, 0);
     if (bytes_received <= 0) {
         printf("[ERROR] No response received or connection closed.\n");
-        close(sock);
+        close(auth_sock);
         return;
     }
 
@@ -379,7 +487,7 @@ void authenticate_with_server(GtkWidget *widget, gpointer data) {
         printf("[ERROR] Authentication failed!\n");
     }
 
-    close(sock);
+    close(auth_sock);
 }
 int main(int argc, char *argv[]) {
 	setvbuf(stdout, NULL, _IONBF, 0); // Disable output buffering
