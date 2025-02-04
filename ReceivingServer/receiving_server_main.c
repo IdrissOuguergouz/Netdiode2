@@ -564,12 +564,14 @@ int encrypt_payload(const char *payload, size_t payload_len, char *encrypted_pay
     unsigned char aes_key[AES_KEY_SIZE], aes_iv[AES_IV_SIZE];
     generate_aes_key_iv(aes_key, aes_iv);
 
+    printf("Clé AES générée: %s\n", aes_key);
     char encrypted_aes_key[512];
     size_t encrypted_aes_key_len;
     if (encrypt_rsa(aes_key, AES_KEY_SIZE, encrypted_aes_key, encrypted_aes_key_len, keys_path, client_id) != 1) {
         fprintf(stderr, "Erreur lors du chiffrement de la clé AES avec RSA\n");
         return -1;
     }
+    printf("Clé AES chiffrée avec RSA: %s\n", encrypted_aes_key);
 
     // Chiffrement du JSON original avec AES-256-CBC + Salted__
     unsigned char ciphertext[SERVER_BUFFER_SIZE];
@@ -590,6 +592,7 @@ int encrypt_payload(const char *payload, size_t payload_len, char *encrypted_pay
     EVP_EncodeBlock((unsigned char *)aes_iv_base64, aes_iv, AES_IV_SIZE);
     EVP_EncodeBlock((unsigned char *)encrypted_aes_key_base64, encrypted_aes_key, encrypted_aes_key_len);
 
+    printf("Clé AES chiffrée en Base64: %s\n", encrypted_aes_key_base64);
     // Création du JSON final chiffré
     cJSON *final_payload_json = cJSON_CreateObject();
     cJSON_AddStringToObject(final_payload_json, "aes_key", encrypted_aes_key_base64);
