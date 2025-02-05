@@ -1024,7 +1024,7 @@ int decode_rs(unsigned char* received, unsigned char* decoded) {
     correct_reed_solomon *rs = correct_reed_solomon_create(0x11D, 1, 1, 16);
     if (!rs) {
         fprintf(stderr, "Erreur lors de la création du décodeur Reed-Solomon\n");
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
     unsigned char block[ENCODED_SIZE] = {0};
@@ -1033,23 +1033,18 @@ int decode_rs(unsigned char* received, unsigned char* decoded) {
     if (decoded_len < 0) {
         fprintf(stderr, "Erreur de décodage. Taille décodée: %ld\n", decoded_len);
         correct_reed_solomon_destroy(rs);
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
-    // Suppression des octets de bourrage (0x00 ou 0xFF)
-    while (decoded_len > 0 && (block[decoded_len - 1] == 0x00 || block[decoded_len - 1] == 0xFF)) {
-        decoded_len--;
-    }
-
-    memcpy(decoded, block, decoded_len);  // Copier seulement les données utiles
-    decoded[decoded_len] = '\0';  // Ajout de fin de chaîne pour affichage correct
+    memcpy(decoded, block, decoded_len);  // Copier seulement les octets valides
+    decoded[decoded_len] = '\0';  // Assurer la fin de la chaîne
 
     correct_reed_solomon_destroy(rs);
-    return decoded_len;  // Retourne la taille réelle des données décodées
+    return 0;
 }
 
-void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer_size) {
-    // Lire le fichier encodé
+void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer_size){
+    // Décodage correcteur du fichier
     size_t file_size;
     unsigned char* encoded_data = read_file(fullpath_filename, &file_size);
     if (!encoded_data) {
@@ -1057,32 +1052,41 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
         return;
     }
     
-    // Construire le nom du fichier de sortie
     const char *filename = strrchr(fullpath_filename, '/');
-    filename = (filename) ? filename + 1 : fullpath_filename;
+    if (filename) {
+        filename++; // Skip the '/'
+    } else {
+        filename = fullpath_filename; // No '/' found, use the whole string
+    }
     snprintf(decoded_filepath, buffer_size, "Temp/decoded_%s", filename);
     
     FILE *decoded_file = fopen(decoded_filepath, "wb");
     if (!decoded_file) {
         perror("Erreur ouverture fichier décodé");
-        free(encoded_data);
         return;
     }
 
     size_t num_block_decode = file_size / ENCODED_SIZE;
 
-    for (size_t i = 0; i < num_block_decode; i++) {
-        unsigned char decoded_block_data[BLOCK_SIZE + 1] = {0};  // Buffer avec un espace pour '\0'
+    for (int i = 0; i < num_block_decode; i++) {
+        unsigned char decoded_block_data[BLOCK_SIZE + 1]; // prendre en compte le caractère de fin de chaîne
         unsigned char block_data[ENCODED_SIZE] = {0};
         memcpy(block_data, encoded_data + i * ENCODED_SIZE, ENCODED_SIZE);
 
-        ssize_t decoded_size = decode_rs(block_data, decoded_block_data);
-        if (decoded_size < 0) {
-            fprintf(stderr, "Erreur de décodage pour le bloc %zu\n", i);
-            continue;
-        }
+        decode_rs(block_data, decoded_block_data);
 
-        fwrite(decoded_block_data, 1, decoded_size, decoded_file);
+        unsigned char block_data_decode[BLOCK_SIZE] = {0};
+        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); // Copier tout sans le caractère de fin de chaîne
+
+        if (i == num_block_decode - 1) {
+            // supprimer les octets de bourrage
+            size_t last_block_size = strlen((char*)block_data_decode);
+            fwrite(block_data_decode, last_block_size, 1, decoded_file);
+            break;
+        }
+        else{
+            fwrite(decoded_block_data, BLOCK_SIZE, 1, decoded_file);
+        }
     }
 
     fclose(decoded_file);
