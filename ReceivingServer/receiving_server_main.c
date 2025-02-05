@@ -948,7 +948,7 @@ void watch_directory(const char *watch_dir) {
         exit(1);
     }
 
-    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE);
+    int wd = inotify_add_watch(fd, watch_dir, IN_MOVED_TO);
     if (wd < 0) {
         perror("inotify_add_watch");
         exit(1);
@@ -964,8 +964,8 @@ void watch_directory(const char *watch_dir) {
         }
 
         struct inotify_event *event = (struct inotify_event *)buffer;
-        if (event->mask & IN_CREATE) {
-            printf("%s\n", event->name);  // Affiche uniquement le nom du fichier
+        if (event->mask & IN_MOVED_TO) {  // ✅ Correction ici
+            printf("%s\n", event->name);
         }
     }
 
@@ -973,20 +973,20 @@ void watch_directory(const char *watch_dir) {
 }
 
 int watch_directory_nonblocking(const char *watch_dir) {
-    int fd = inotify_init1(IN_NONBLOCK); // Mode non bloquant
+    int fd = inotify_init1(IN_NONBLOCK);
     if (fd < 0) {
         perror("inotify_init1");
         return -1;
     }
 
-    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE);
+    int wd = inotify_add_watch(fd, watch_dir, IN_MOVED_TO);  // ✅ Correction ici
     if (wd < 0) {
         perror("inotify_add_watch");
         close(fd);
         return -1;
     }
 
-    return fd; // Retourne le descripteur pour surveillance
+    return fd;
 }
 
 int check_new_files(int inotify_fd, char *filename, size_t max_len) {
@@ -1010,12 +1010,7 @@ int check_new_files(int inotify_fd, char *filename, size_t max_len) {
     struct inotify_event *event;
     for (char *ptr = buffer; ptr < buffer + length; ptr += sizeof(struct inotify_event) + event->len) {
         event = (struct inotify_event *)ptr;
-        if ((event->mask & (IN_CREATE | IN_MOVED_TO)) && event->len > 0) {
-            if (event->name[0] == '.') continue; // Ignorer fichiers temporaires
-
-            // Petite pause pour éviter les fichiers temporaires
-            usleep(50000);
-
+        if ((event->mask & IN_MOVED_TO) && event->len > 0) {
             strncpy(filename, event->name, max_len - 1);
             filename[max_len - 1] = '\0';
             return 1;
