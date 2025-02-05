@@ -1095,6 +1095,7 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
             printf("Bloc %d : taille valide différente de 223 (%zu). Arrêt.\n", i, valid_size);
             fclose(decoded_file);
             free(encoded_data);
+            printf("Fichier décodé : %s\n", decoded_filepath);
             return; // Arrêter la fonction immédiatement
         }
     }
