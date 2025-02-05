@@ -948,7 +948,7 @@ void watch_directory(const char *watch_dir) {
         exit(1);
     }
 
-    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE);
+    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE | IN_MOVED_TO);
     if (wd < 0) {
         perror("inotify_add_watch");
         exit(1);
@@ -995,7 +995,6 @@ int check_new_files(int inotify_fd, char *filename, size_t max_len) {
 
     if (length < 0) {
         if (errno == EAGAIN) {
-            // Aucune donnée prête, c'est normal en mode non-bloquant
             return 0;
         } else {
             perror("Erreur inotify read");
@@ -1005,22 +1004,24 @@ int check_new_files(int inotify_fd, char *filename, size_t max_len) {
 
     if (length == 0) {
         printf("Aucun événement détecté.\n");
-        return 0; // Aucune donnée à traiter
+        return 0;
     }
 
-    if (length > 0) {
-        struct inotify_event *event;
-        for (char *ptr = buffer; ptr < buffer + length;
-             ptr += EVENT_SIZE + event->len) {
-            event = (struct inotify_event *)ptr;
-            if ((event->mask & IN_CREATE) && event->len > 0) {
-                strncpy(filename, event->name, max_len - 1);
-                filename[max_len - 1] = '\0'; // Sécurité pour éviter un buffer overflow
-                return 1; // Fichier détecté
-            }
+    struct inotify_event *event;
+    for (char *ptr = buffer; ptr < buffer + length; ptr += sizeof(struct inotify_event) + event->len) {
+        event = (struct inotify_event *)ptr;
+        if ((event->mask & (IN_CREATE | IN_MOVED_TO)) && event->len > 0) {
+            if (event->name[0] == '.') continue; // Ignorer fichiers temporaires
+
+            // Petite pause pour éviter les fichiers temporaires
+            usleep(50000);
+
+            strncpy(filename, event->name, max_len - 1);
+            filename[max_len - 1] = '\0';
+            return 1;
         }
     }
-    return 0; // Aucun fichier détecté
+    return 0;
 }
 
 // Fonction pour décoder les données avec Reed-Solomon
