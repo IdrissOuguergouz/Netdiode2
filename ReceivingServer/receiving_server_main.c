@@ -948,7 +948,7 @@ void watch_directory(const char *watch_dir) {
         exit(1);
     }
 
-    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE | IN_MOVED_TO);
+    int wd = inotify_add_watch(fd, watch_dir, IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE);
     if (wd < 0) {
         perror("inotify_add_watch");
         exit(1);
