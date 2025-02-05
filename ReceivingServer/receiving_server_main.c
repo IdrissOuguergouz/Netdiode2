@@ -1089,6 +1089,10 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
 
         // Écrire uniquement les données valides dans le fichier
         fwrite(block_data_decode, valid_size, 1, decoded_file);
+        
+        memset(decoded_block_data, 0, sizeof(decoded_block_data));
+        memset(block_data_decode, 0, sizeof(block_data_decode));
+
     }
 
     fclose(decoded_file);
