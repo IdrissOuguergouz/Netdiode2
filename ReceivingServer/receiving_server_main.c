@@ -1069,25 +1069,20 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
     size_t num_block_decode = file_size / ENCODED_SIZE;
 
     for (int i = 0; i < num_block_decode; i++) {
-        unsigned char decoded_block_data[BLOCK_SIZE + 1]; // prendre en compte le caractère de fin de chaîne
+        unsigned char decoded_block_data[BLOCK_SIZE + 1] = {0}; 
         unsigned char block_data[ENCODED_SIZE] = {0};
         memcpy(block_data, encoded_data + i * ENCODED_SIZE, ENCODED_SIZE);
 
         decode_rs(block_data, decoded_block_data);
 
         unsigned char block_data_decode[BLOCK_SIZE] = {0};
-        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); // Copier tout sans le caractère de fin de chaîne
+        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); 
 
-        if (i == num_block_decode - 1) {
-            // supprimer les octets de bourrage
-            size_t last_block_size = strlen((char*)block_data_decode);
-            fwrite(block_data_decode, last_block_size, 1, decoded_file);
-            break;
-        }
-        else{
-            fwrite(decoded_block_data, BLOCK_SIZE, 1, decoded_file);
-        }
+        // Déterminer la taille des données valides avant le premier '\x00'
+        size_t valid_size = strnlen((char*)block_data_decode, BLOCK_SIZE);
+        fwrite(block_data_decode, valid_size, 1, decoded_file);
     }
+
 
     fclose(decoded_file);
     free(encoded_data);
