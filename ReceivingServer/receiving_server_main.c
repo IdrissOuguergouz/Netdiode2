@@ -938,20 +938,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     cJSON_Delete(payload_json);
     printf("Payload JSON: %s\n", payload_str);
 
-    // Chiffrer le payload
-    char encrypted_response_payload[SERVER_BUFFER_SIZE];
-    if (encrypt_payload(payload_str, strlen(payload_str), encrypted_response_payload, sizeof(encrypted_response_payload), keys_path, client_id) != 1) {
-        fprintf(stderr, "Erreur lors du chiffrement du payload\n");
-        const char *response = "Erreur lors du chiffrement du payload\n";
-        send(client_socket, response, strlen(response), 0);
-        free(payload_str);
-        close(client_socket);
-        return;
-    }
-    free(payload_str);
-
     // Envoyer le payload chiffré au client
-    printf("Payload chiffré: %s\n", encrypted_response_payload);
     send(client_socket, payload_str, strlen(payload_str), 0);
 
     // Étape 5 : Réponse au client
