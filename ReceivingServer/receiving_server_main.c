@@ -1106,7 +1106,7 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
     } else {
         filename = fullpath_filename; // No '/' found, use the whole string
     }
-    snprintf(decoded_filepath, buffer_size, "Temp/decoded_%s", filename);
+    snprintf(decoded_filepath, buffer_size + 255, "decoded_files/192.168.57.2_decoded_%s", filename);
     
     FILE *decoded_file = fopen(decoded_filepath, "wb");
     if (!decoded_file) {
@@ -1216,6 +1216,12 @@ int main() {
 
     // Créer le dossier Temp avec les permissions 700
     if (mkdir("Temp", S_IRWXU) != 0 && errno != EEXIST) {
+        perror("Erreur lors de la création du dossier Temp");
+        return EXIT_FAILURE;
+    }
+
+    // Créer le dossier decoded_files avec les permissions 700
+    if (mkdir("decoded_files", S_IRWXU) != 0 && errno != EEXIST) {
         perror("Erreur lors de la création du dossier Temp");
         return EXIT_FAILURE;
     }
