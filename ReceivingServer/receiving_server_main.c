@@ -831,7 +831,7 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
         char encrypted_response[SERVER_BUFFER_SIZE];
         if (encrypt_payload(response, strlen(response), encrypted_response, sizeof(encrypted_response), keys_path, client_id) == 1) {
             printf("encrypted_response: %s\n", encrypted_response);
-            send(client_socket, encrypted_response, strlen(encrypted_response), 0);
+            send(client_socket, response, strlen(response), 0);
         } else {
             fprintf(stderr, "| Erreur lors du chiffrement de la réponse\n");
             const char *response = "Erreur lors du chiffrement de la réponse\n";
@@ -951,7 +951,8 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     free(payload_str);
 
     // Envoyer le payload chiffré au client
-    send(client_socket, encrypted_response_payload, strlen(encrypted_response_payload), 0);
+    printf("Payload chiffré: %s\n", encrypted_response_payload);
+    send(client_socket, payload_str, strlen(payload_str), 0);
 
     // Étape 5 : Réponse au client
     const char *response = "Demande reçue avec succès !\n";
