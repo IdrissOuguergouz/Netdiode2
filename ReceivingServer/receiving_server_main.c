@@ -1062,7 +1062,7 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
     } else {
         filename = fullpath_filename; // No '/' found, use the whole string
     }
-    snprintf(decoded_filepath, sizeof(filename) + 13, "Temp/decoded_%s", filename);
+    snprintf(decoded_filepath, buffer_size + 5, "Temp/decoded_%s", filename);
     
     FILE *decoded_file = fopen(decoded_filepath, "wb");
     if (!decoded_file) {
