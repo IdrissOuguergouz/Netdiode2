@@ -1076,13 +1076,20 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
         decode_rs(block_data, decoded_block_data);
 
         unsigned char block_data_decode[BLOCK_SIZE] = {0};
-        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE); 
+        memcpy(block_data_decode, decoded_block_data, BLOCK_SIZE);
 
-        // Déterminer la taille des données valides avant le premier '\x00'
-        size_t valid_size = strnlen((char*)block_data_decode, BLOCK_SIZE);
+        // Déterminer la taille valide des données (jusqu'au premier '\x00')
+        size_t valid_size = 0;
+        for (size_t j = 0; j < BLOCK_SIZE; j++) {
+            if (block_data_decode[j] == '\x00') {
+                break;
+            }
+            valid_size++;
+        }
+
+        // Écrire uniquement les données valides dans le fichier
         fwrite(block_data_decode, valid_size, 1, decoded_file);
     }
-
 
     fclose(decoded_file);
     free(encoded_data);
