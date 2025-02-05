@@ -9,6 +9,7 @@
 #include <openssl/err.h>
 #include <cjson/cJSON.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -123,6 +124,44 @@ int load_acl(const char *filename) {
 
     fclose(file);
     return 1;
+}
+
+// Forward declaration of read_file function
+unsigned char* read_file(const char *filename, size_t *filesize) {
+    FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
+    if (!file) {
+        perror("Erreur d'ouverture");
+        return NULL;
+    }
+
+    // Obtenir la taille du fichier
+    fseek(file, 0, SEEK_END);
+    *filesize = ftell(file);  // On stocke la taille dans la variable pointée
+    rewind(file);
+
+    // Allouer la mémoire
+    unsigned char *content = (unsigned char*)malloc(*filesize + 1);
+    if (!content) {
+        perror("Erreur d'allocation");
+        fclose(file);
+        return NULL;
+    }
+
+    // Lire le fichier en mémoire
+    size_t read_size = fread(content, 1, *filesize, file);
+    fclose(file);
+
+    // Vérifier que toute la lecture s'est bien passée
+    if (read_size != *filesize) {
+        fprintf(stderr, "Erreur de lecture du fichier : attendu %zu, lu %zu\n", *filesize, read_size);
+        free(content);
+        return NULL;
+    }
+
+    // Ajouter un caractère de fin de chaîne (utile pour les fichiers texte)
+    content[*filesize] = '\0';
+
+    return content;
 }
 
 // Fonction pour envoyer un fichier au client
@@ -845,29 +884,74 @@ void handle_client(int client_socket, const char *keys_path, const char *transfe
     cJSON_Delete(decrypted_json);
 
     // Étape 4 : Envoyer les fichiers au client
-    DIR *dir = opendir(transfer_dir);
-    if (!dir) {
-        perror("Erreur d'ouverture du dossier de transfert");
-        const char *response = "Erreur d'ouverture du dossier de transfert\n";
+    DIR *dir;
+    struct dirent *entry;
+    char decoded_files_dir[512];
+    snprintf(decoded_files_dir, sizeof(decoded_files_dir), "decoded_files");
+
+    if ((dir = opendir(decoded_files_dir)) == NULL) {
+        perror("Erreur d'ouverture du dossier decoded_files");
+        const char *response = "Erreur d'ouverture du dossier decoded_files\n";
         send(client_socket, response, strlen(response), 0);
         cJSON_Delete(decrypted_json);
         close(client_socket);
         return;
     }
 
-    struct dirent *entry;
+    cJSON *files_json = cJSON_CreateArray();
     while ((entry = readdir(dir)) != NULL) {
-        struct stat file_stat;
-        char file_path[512];
-        snprintf(file_path, sizeof(file_path), "%s/%s", transfer_dir, entry->d_name);
-        if (stat(file_path, &file_stat) == 0 && S_ISREG(file_stat.st_mode)) { // Vérifier si c'est un fichier régulier
-            char file_path[512];
-            snprintf(file_path, sizeof(file_path), "%s/%s", transfer_dir, entry->d_name);
-            send_file(client_socket, file_path);
+        struct stat entry_stat;
+        char entry_path[1024];
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", decoded_files_dir, entry->d_name);
+        if (stat(entry_path, &entry_stat) == 0 && S_ISREG(entry_stat.st_mode)) {
+            // Vérifier si le fichier correspond au pattern <ip_du_client>_file
+            if (strstr(entry->d_name, client_ip) == entry->d_name && strstr(entry->d_name, "_file") != NULL) {
+                char file_path[1024];
+                snprintf(file_path, sizeof(file_path), "%s/%s", decoded_files_dir, entry->d_name);
+
+                // Lire le fichier et le convertir en base64
+                size_t file_size;
+                unsigned char *file_content = read_file(file_path, &file_size);
+                if (!file_content) {
+                    fprintf(stderr, "Erreur de lecture du fichier %s\n", file_path);
+                    continue;
+                }
+
+                char file_base64[SERVER_BUFFER_SIZE];
+                EVP_EncodeBlock((unsigned char *)file_base64, file_content, file_size);
+                free(file_content);
+
+                // Ajouter le fichier encodé en base64 au JSON
+                cJSON *file_json = cJSON_CreateObject();
+                cJSON_AddStringToObject(file_json, "filename", entry->d_name);
+                cJSON_AddStringToObject(file_json, "content", file_base64);
+                cJSON_AddItemToArray(files_json, file_json);
+            }
         }
     }
-
     closedir(dir);
+
+    // Créer le payload JSON
+    cJSON *payload_json = cJSON_CreateObject();
+    cJSON_AddItemToObject(payload_json, "files", files_json);
+    char *payload_str = cJSON_PrintUnformatted(payload_json);
+    cJSON_Delete(payload_json);
+    printf("Payload JSON: %s\n", payload_str);
+
+    // Chiffrer le payload
+    char encrypted_response_payload[SERVER_BUFFER_SIZE];
+    if (encrypt_payload(payload_str, strlen(payload_str), encrypted_response_payload, sizeof(encrypted_response_payload), keys_path, client_id) != 1) {
+        fprintf(stderr, "Erreur lors du chiffrement du payload\n");
+        const char *response = "Erreur lors du chiffrement du payload\n";
+        send(client_socket, response, strlen(response), 0);
+        free(payload_str);
+        close(client_socket);
+        return;
+    }
+    free(payload_str);
+
+    // Envoyer le payload chiffré au client
+    send(client_socket, encrypted_response_payload, strlen(encrypted_response_payload), 0);
 
     // Étape 5 : Réponse au client
     const char *response = "Demande reçue avec succès !\n";
@@ -902,43 +986,6 @@ int load_config(const char *filename, Config *config) {
 
     fclose(file);
     return 1;
-}
-
-unsigned char* read_file(const char *filename, size_t *filesize) {
-    FILE *file = fopen(filename, "rb"); // "rb" pour lecture binaire
-    if (!file) {
-        perror("Erreur d'ouverture");
-        return NULL;
-    }
-
-    // Obtenir la taille du fichier
-    fseek(file, 0, SEEK_END);
-    *filesize = ftell(file);  // On stocke la taille dans la variable pointée
-    rewind(file);
-
-    // Allouer la mémoire
-    unsigned char *content = (unsigned char*)malloc(*filesize + 1);
-    if (!content) {
-        perror("Erreur d'allocation");
-        fclose(file);
-        return NULL;
-    }
-
-    // Lire le fichier en mémoire
-    size_t read_size = fread(content, 1, *filesize, file);
-    fclose(file);
-
-    // Vérifier que toute la lecture s'est bien passée
-    if (read_size != *filesize) {
-        fprintf(stderr, "Erreur de lecture du fichier : attendu %zu, lu %zu\n", *filesize, read_size);
-        free(content);
-        return NULL;
-    }
-
-    // Ajouter un caractère de fin de chaîne (utile pour les fichiers texte)
-    content[*filesize] = '\0';
-
-    return content;
 }
 
 void watch_directory(const char *watch_dir) {
