@@ -1087,9 +1087,16 @@ void decode(const char *fullpath_filename, char *decoded_filepath, size_t buffer
             valid_size++;
         }
 
+        printf("Bloc %d : taille valide = %zu, données = ", i, valid_size);
+        for (size_t j = 0; j < valid_size; j++) {
+            printf("%02X ", block_data_decode[j]);
+        }
+        printf("\n");
+
+
         // Écrire uniquement les données valides dans le fichier
         fwrite(block_data_decode, valid_size, 1, decoded_file);
-        
+
         memset(decoded_block_data, 0, sizeof(decoded_block_data));
         memset(block_data_decode, 0, sizeof(block_data_decode));
 
